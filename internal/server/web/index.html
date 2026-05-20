@@ -133,6 +133,20 @@ token-usage-watcher \
 
 </main>
 
+<div id="price-modal" class="modal" hidden aria-hidden="true">
+  <div class="modal-backdrop"></div>
+  <div class="modal-card" role="dialog" aria-labelledby="price-title">
+    <header class="modal-head">
+      <h2 id="price-title">—</h2>
+      <button id="price-close" class="modal-close" aria-label="close">×</button>
+    </header>
+    <ul class="legend price-legend" id="price-legend"></ul>
+    <div class="price-chart-wrap">
+      <svg id="price-chart" preserveAspectRatio="none" aria-label="price history"></svg>
+    </div>
+  </div>
+</div>
+
 <footer class="footline">
   <span class="dim">token-usage / observatory</span>
   <span class="dim">readings via <code>/summary</code></span>

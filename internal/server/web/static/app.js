@@ -80,6 +80,7 @@
     user: "",
     rows: [],
     users: [],          // registered users (from /users); may include zero-data users
+    prices: null,       // /prices history, lazily loaded on first modal open
     sortKey: "day",
     sortDir: "desc",
     filter: "",
@@ -108,6 +109,11 @@
     modelRank:    $("model-rank"),
     userRank:     $("user-rank"),
     toolRank:     $("tool-rank"),
+    priceModal:   $("price-modal"),
+    priceTitle:   $("price-title"),
+    priceLegend:  $("price-legend"),
+    priceChart:   $("price-chart"),
+    priceClose:   $("price-close"),
     ledgerBody:   document.querySelector("#ledger tbody"),
     ledgerHead:   document.querySelectorAll("#ledger thead th"),
     ledgerFilter: $("ledger-filter"),
@@ -438,11 +444,20 @@
   function moveTooltip(e) {
     const t = els.tooltip;
     const wrap = els.chartWrap.getBoundingClientRect();
-    const x = e.clientX - wrap.left + 12;
-    const y = e.clientY - wrap.top + 12;
-    const max = wrap.width - t.offsetWidth - 8;
-    t.style.left = Math.min(x, max) + "px";
-    t.style.top  = y + "px";
+    // Center horizontally on cursor; place above cursor with a small gap
+    // so the bar being inspected isn't covered.
+    const tw = t.offsetWidth;
+    const th = t.offsetHeight;
+    const cursorX = e.clientX - wrap.left;
+    const cursorY = e.clientY - wrap.top;
+    let left = cursorX - tw / 2;
+    let top  = cursorY - th - 10;
+    // Clamp horizontally so the tooltip stays inside the chart.
+    left = Math.max(4, Math.min(left, wrap.width - tw - 4));
+    // If above cursor would clip the top of the chart, fall through to below.
+    if (top < 4) top = cursorY + 14;
+    t.style.left = left + "px";
+    t.style.top  = top + "px";
   }
   function hideTooltip() { els.tooltip.hidden = true; }
 
@@ -455,16 +470,19 @@
       const pct = max > 0 ? (item.cost / max * 100) : 0;
       const nameChildren = [];
       let display = item.name;
+      let nameAttrs = { class: "rk-name" };
       if (mode === "model") {
         nameChildren.push(el("span", { class: "swatch", style: `background:${colorFor(item.name)}` }));
         display = shortenModel(item.name);
+        nameAttrs["data-model"] = item.name;
+        nameAttrs.title = "click for price history";
       } else if (mode === "tool") {
         nameChildren.push(el("span", { class: "swatch", style: `background:${colorForTool(item.name)}` }));
       }
       nameChildren.push(document.createTextNode(display));
       const li = el("li", null, [
         el("span", { class: "rk-num" }, String(i + 1).padStart(2, "0")),
-        el("span", { class: "rk-name" }, nameChildren),
+        el("span", nameAttrs, nameChildren),
         el("span", { class: "rk-val" }, "$" + fmtUSD(item.cost)),
         el("span", { class: "rk-bar" }, el("i", { style: `width:${pct.toFixed(1)}%` })),
       ]);
@@ -510,7 +528,7 @@
       const tr = document.createElement("tr");
       tr.appendChild(el("td", null, r.day));
       tr.appendChild(el("td", null, r.user));
-      const modelTd = el("td", { class: "model-cell" }, [
+      const modelTd = el("td", { class: "model-cell", "data-model": r.model, title: "click for price history" }, [
         el("span", { class: "swatch", style: `background:${colorFor(r.model)}` }),
         document.createTextNode(shortenModel(r.model)),
       ]);
@@ -526,6 +544,205 @@
     });
     els.ledgerBody.appendChild(frag);
   }
+
+  // ---- price modal --------------------------------------------------------
+  const PRICE_METRICS = [
+    { key: "input_per_1m",          color: "#ff5c1a", label: "input"       },
+    { key: "output_per_1m",         color: "#d96e9a", label: "output"      },
+    { key: "cache_creation_per_1m", color: "#e8c47e", label: "cache write" },
+    { key: "cache_read_per_1m",     color: "#76c7c0", label: "cache read"  },
+  ];
+
+  async function ensurePrices() {
+    if (state.prices) return state.prices;
+    const r = await fetch("/prices");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    state.prices = await r.json();
+    return state.prices;
+  }
+
+  function bestPrefix(model, prices) {
+    let best = null;
+    const seen = new Set();
+    for (const p of prices) {
+      if (seen.has(p.model_prefix)) continue;
+      seen.add(p.model_prefix);
+      if (model.startsWith(p.model_prefix)) {
+        if (!best || p.model_prefix.length > best.length) best = p.model_prefix;
+      }
+    }
+    return best;
+  }
+
+  async function openPriceModal(model) {
+    let prices;
+    try {
+      prices = await ensurePrices();
+    } catch (e) {
+      console.error("fetch /prices failed", e);
+      return;
+    }
+    const prefix = bestPrefix(model, prices);
+    if (!prefix) {
+      // No known prefix — still show the modal with a "no data" hint.
+      showModal(model, "(no pricing recorded)", []);
+      return;
+    }
+    const history = prices
+      .filter(p => p.model_prefix === prefix)
+      .sort((a, b) => a.valid_from.localeCompare(b.valid_from));
+    showModal(model, prefix, history);
+  }
+
+  function showModal(model, prefix, history) {
+    els.priceModal.hidden = false;
+    els.priceModal.setAttribute("aria-hidden", "false");
+    clear(els.priceTitle);
+    els.priceTitle.appendChild(document.createTextNode(model));
+    const sub = el("span", { class: "dim", style: "font-size:14px; margin-left:10px" },
+      "prefix: " + prefix);
+    els.priceTitle.appendChild(sub);
+
+    // legend doubles as the "current value" readout
+    clear(els.priceLegend);
+    const latest = history[history.length - 1];
+    for (const m of PRICE_METRICS) {
+      const children = [
+        el("span", { class: "swatch", style: `background:${m.color}` }),
+        el("span", null, m.label),
+      ];
+      if (latest) {
+        children.push(el("span", { class: "pct" },
+          "$" + latest[m.key].toFixed(2) + "/M"));
+      }
+      els.priceLegend.appendChild(el("li", null, children));
+    }
+
+    renderPriceChart(history);
+  }
+
+  function closePriceModal() {
+    els.priceModal.hidden = true;
+    els.priceModal.setAttribute("aria-hidden", "true");
+  }
+
+  function renderPriceChart(rows) {
+    const svgEl = els.priceChart;
+    clear(svgEl);
+    if (rows.length === 0) return;
+
+    const W = svgEl.clientWidth || 700;
+    const H = svgEl.clientHeight || 240;
+    const padL = 56, padR = 14, padT = 14, padB = 28;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+
+    const t0 = new Date(rows[0].valid_from).getTime();
+    let t1 = Date.now();
+    for (const r of rows) {
+      if (r.valid_to) t1 = Math.max(t1, new Date(r.valid_to).getTime());
+    }
+    if (t1 <= t0) t1 = t0 + 86400_000; // ensure non-zero span
+    // Treat any valid_from earlier than 2020 as "since forever" — clamp so
+    // the seed row (valid_from=1970-01-01) doesn't squash the whole chart.
+    const clamped = t0 < new Date("2020-01-01").getTime();
+    const tStart = clamped ? Math.max(t0, t1 - 365 * 86400_000) : t0;
+
+    let maxV = 0;
+    for (const r of rows) {
+      for (const m of PRICE_METRICS) {
+        if (r[m.key] > maxV) maxV = r[m.key];
+      }
+    }
+    const niceMax = niceCeil(maxV);
+
+    svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const xOf = t => padL + (Math.max(t, tStart) - tStart) / (t1 - tStart) * innerW;
+    const yOf = v => padT + innerH - (v / niceMax) * innerH;
+
+    // y gridlines + labels — pick step count that keeps tick values "round".
+    // niceMax is always 1/2/5 × 10^N, so 5 steps gives whole-number divisions
+    // (e.g. 50 → 0/10/20/30/40/50, 20 → 0/4/8/…, 25 → 0/5/10/…).
+    const steps = 5;
+    for (let i = 0; i <= steps; i++) {
+      const v = niceMax * (i / steps);
+      const y = padT + innerH - (i / steps) * innerH;
+      svgEl.appendChild(svg("line", {
+        x1: padL, x2: W - padR, y1: y, y2: y,
+        stroke: "#232a36", "stroke-dasharray": "3,3",
+      }));
+      const t = svg("text", {
+        x: padL - 8, y: y + 3, "text-anchor": "end", class: "bar-tick",
+      });
+      t.textContent = formatPriceTick(v);
+      svgEl.appendChild(t);
+    }
+
+    // Step lines per metric.
+    for (const m of PRICE_METRICS) {
+      let d = "";
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const x1 = xOf(new Date(r.valid_from).getTime());
+        const x2 = xOf(r.valid_to ? new Date(r.valid_to).getTime() : t1);
+        const y = yOf(r[m.key]);
+        if (i === 0) {
+          d += `M ${x1} ${y} L ${x2} ${y}`;
+        } else {
+          const prevY = yOf(rows[i - 1][m.key]);
+          d += ` L ${x1} ${prevY} L ${x1} ${y} L ${x2} ${y}`;
+        }
+      }
+      svgEl.appendChild(svg("path", {
+        d, stroke: m.color, fill: "none", "stroke-width": "2",
+        "stroke-linecap": "square",
+      }));
+    }
+
+    // x-axis labels: earliest visible date + "now" (or last valid_to).
+    // If start and end fall on the same calendar day, only show one label
+    // so we don't duplicate it.
+    const startISO = new Date(tStart).toISOString().slice(0, 10);
+    const endISO   = new Date(t1).toISOString().slice(0, 10);
+    const sameDay  = startISO === endISO;
+    const xLabels = sameDay
+      ? [{ x: (padL + W - padR) / 2, t: startISO,                  anchor: "middle" }]
+      : [
+          { x: padL,     t: startISO, anchor: "start" },
+          { x: W - padR, t: endISO,   anchor: "end"   },
+        ];
+    for (const lab of xLabels) {
+      const t = svg("text", {
+        x: lab.x, y: H - 8, "text-anchor": lab.anchor, class: "bar-tick",
+      });
+      t.textContent = lab.t;
+      svgEl.appendChild(t);
+    }
+  }
+
+  function formatPriceTick(v) {
+    if (v === 0) return "$0";
+    if (v >= 10) return "$" + v.toFixed(0);
+    if (v >= 1)  return "$" + v.toFixed(1);
+    return "$" + v.toFixed(2);
+  }
+
+  // close handlers — X, backdrop click, Escape
+  els.priceClose.addEventListener("click", closePriceModal);
+  els.priceModal.addEventListener("click", (e) => {
+    if (e.target.classList.contains("modal-backdrop")) closePriceModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.priceModal.hidden) closePriceModal();
+  });
+
+  // Event delegation: any element carrying data-model triggers the modal.
+  document.body.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-model]");
+    if (!t) return;
+    const m = t.getAttribute("data-model");
+    if (m) openPriceModal(m);
+  });
 
   // ---- boot ---------------------------------------------------------------
   let resizeTimer = null;
