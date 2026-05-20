@@ -1,0 +1,26 @@
+# token-usage server + PostgreSQL
+#
+# Quickstart (after make docker, or pulling from ghcr.io):
+#   docker compose up -d
+#   docker compose run --rm server admin user-add alice
+#   docker compose run --rm server admin key-create --name laptop alice
+#   open http://localhost:8080
+#
+# Overridable via shell env or .env file:
+#   TU_IMAGE      = which image to run (default: token-usage-server:dev, built locally)
+#   SERVER_PORT   = host port mapped to server :8080  (default: 8080)
+#   PG_PASSWORD   = postgres password                  (default: postgres)
+#   HTTPS_PROXY / HTTP_PROXY / NO_PROXY / GOPROXY → passed into `build` only
+
+services:
+  server:
+    image: token-usage-server:dev
+    environment:
+      TOKENUSAGE_DSN: "postgresql://postgres:${PG_PASSWORD:-postgres}@${PG_HOST:-postgres}:${PG_PORT:-5432}/tokenusage?sslmode=disable"
+    ports:
+      - "5678:8080"
+    restart: unless-stopped
+    # Uncomment to mount a custom pricing JSON:
+    # volumes:
+    #   - ./pricing.json:/etc/token-usage/pricing.json:ro
+    # command: ["--pricing", "/etc/token-usage/pricing.json"]

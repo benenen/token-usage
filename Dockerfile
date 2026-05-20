@@ -7,6 +7,18 @@
 FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
+
+# Proxy passthrough — `make docker` forwards these from the host env if set.
+# Only the build stage sees them; the final image inherits nothing.
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG GOPROXY
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    GOPROXY=${GOPROXY:-https://proxy.golang.org,direct}
+
 WORKDIR /src
 
 # warm module cache before copying full source
