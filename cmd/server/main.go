@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,43 +11,71 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"tokenusage/internal/server"
 )
 
 func main() {
-	// Subcommand dispatch: `token-usage-server admin <cmd> …`
-	if len(os.Args) >= 2 && os.Args[1] == "admin" {
-		runAdmin(os.Args[2:])
-		return
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
 	}
-	runServer()
 }
 
-func runServer() {
-	addr := flag.String("addr", ":8080", "listen address")
-	dsn := flag.String("dsn", os.Getenv("TOKENUSAGE_DSN"), "PostgreSQL DSN, e.g. postgres://user:pass@host:5432/tokenusage?sslmode=disable")
-	pricePath := flag.String("pricing", os.Getenv("TOKENUSAGE_PRICING"), "optional pricing override JSON")
-	rebuildToday := flag.Duration("rebuild-today-every", 10*time.Minute, "how often to recompute today's usage_daily rows; 0 disables")
-	rebuildDeepHour := flag.Int("rebuild-deep-hour", 8, "local-clock hour (0-23) for the daily deep rebuild; -1 disables")
-	rebuildDeepDays := flag.Int("rebuild-deep-days", 3, "how many days back (incl. today) the deep rebuild covers")
-	flag.Parse()
+// Shared DSN: a persistent flag on root, inherited by every subcommand
+// (server itself + admin/*). Defaults to $TOKENUSAGE_DSN.
+var dsn string
 
-	if *dsn == "" {
-		log.Fatal("--dsn (or TOKENUSAGE_DSN) is required")
+func newRootCmd() *cobra.Command {
+	var (
+		addr            string
+		pricePath       string
+		rebuildToday    time.Duration
+		rebuildDeepHour int
+		rebuildDeepDays int
+	)
+	root := &cobra.Command{
+		Use:   "token-usage-server",
+		Short: "Token-usage central server: HTTP API + dashboard + admin CLI",
+		Long: "Default: runs the HTTP server.\n" +
+			"Subcommand `admin` manages users and API keys (see `admin --help`).",
+		SilenceUsage: true,
+		RunE: func(c *cobra.Command, _ []string) error {
+			if dsn == "" {
+				return errors.New("--dsn (or $TOKENUSAGE_DSN) is required")
+			}
+			return runServer(addr, pricePath, rebuildToday, rebuildDeepHour, rebuildDeepDays)
+		},
 	}
+	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("TOKENUSAGE_DSN"),
+		"PostgreSQL DSN (env: TOKENUSAGE_DSN)")
+	root.Flags().StringVar(&addr, "addr", ":8080", "listen address")
+	root.Flags().StringVar(&pricePath, "pricing", os.Getenv("TOKENUSAGE_PRICING"),
+		"optional pricing override JSON")
+	root.Flags().DurationVar(&rebuildToday, "rebuild-today-every", 10*time.Minute,
+		"how often to recompute today's usage_daily; 0 disables")
+	root.Flags().IntVar(&rebuildDeepHour, "rebuild-deep-hour", 8,
+		"local-clock hour (0-23) for the daily deep rebuild; -1 disables")
+	root.Flags().IntVar(&rebuildDeepDays, "rebuild-deep-days", 3,
+		"how many days back (incl. today) the deep rebuild covers")
 
+	root.AddCommand(newAdminCmd())
+	return root
+}
+
+func runServer(addr, pricePath string, rebuildToday time.Duration, deepHour, deepDays int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store, err := server.NewStore(ctx, *dsn)
+	store, err := server.NewStore(ctx, dsn)
 	if err != nil {
-		log.Fatalf("store: %v", err)
+		return fmt.Errorf("store: %w", err)
 	}
 	defer store.Close()
 
-	pricer, err := server.NewPricer(*pricePath)
+	pricer, err := server.NewPricer(pricePath)
 	if err != nil {
-		log.Fatalf("pricer: %v", err)
+		return fmt.Errorf("pricer: %w", err)
 	}
 
 	api := &server.API{Store: store, Pricer: pricer}
@@ -55,14 +84,14 @@ func runServer() {
 
 	worker := &server.Worker{
 		Store:      store,
-		TodayEvery: *rebuildToday,
-		DeepHour:   *rebuildDeepHour,
-		DeepDays:   *rebuildDeepDays,
+		TodayEvery: rebuildToday,
+		DeepHour:   deepHour,
+		DeepDays:   deepDays,
 	}
 	worker.Start(ctx)
 
 	srv := &http.Server{
-		Addr:              *addr,
+		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -70,18 +99,23 @@ func runServer() {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("token-usage server listening on %s", *addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
+		log.Printf("token-usage server listening on %s", addr)
+		if e := srv.ListenAndServe(); e != nil && e != http.ErrServerClosed {
+			errCh <- e
 		}
 	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
-	log.Print("shutdown signal received")
+	select {
+	case <-sigCh:
+		log.Print("shutdown signal received")
+	case e := <-errCh:
+		return e
+	}
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
-	_ = srv.Shutdown(shutCtx)
+	return srv.Shutdown(shutCtx)
 }
