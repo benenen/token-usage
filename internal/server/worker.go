@@ -18,10 +18,12 @@ import (
 // Day boundaries are always UTC (matches the schema); only the deep-rebuild
 // trigger uses the server's local clock so "8AM" matches operator intuition.
 type Worker struct {
-	Store      *Store
-	TodayEvery time.Duration
-	DeepHour   int
-	DeepDays   int
+	Store       *Store
+	TodayEvery  time.Duration
+	DeepHour    int
+	DeepDays    int
+	PriceEvery  time.Duration // how often to sync model_prices; 0 disables
+	PriceSource string        // LiteLLM URL or mirror; "" → DefaultPriceSourceURL
 }
 
 func (w *Worker) Start(ctx context.Context) {
@@ -31,6 +33,44 @@ func (w *Worker) Start(ctx context.Context) {
 	if w.DeepHour >= 0 && w.DeepHour <= 23 && w.DeepDays > 0 {
 		go w.deepLoop(ctx)
 	}
+	if w.PriceEvery > 0 {
+		go w.priceLoop(ctx)
+	}
+}
+
+func (w *Worker) priceLoop(ctx context.Context) {
+	log.Printf("worker: price-sync every %s (source: %s)",
+		w.PriceEvery, displayPriceSource(w.PriceSource))
+	// First sync at startup so a brand-new server doesn't wait 12h for prices.
+	w.syncPrices(ctx)
+	t := time.NewTicker(w.PriceEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			w.syncPrices(ctx)
+		}
+	}
+}
+
+func (w *Worker) syncPrices(ctx context.Context) {
+	start := time.Now()
+	considered, changed, err := SyncPrices(ctx, w.Store, w.PriceSource, nil)
+	if err != nil {
+		log.Printf("worker: price-sync failed: %v", err)
+		return
+	}
+	log.Printf("worker: price-sync ok — considered=%d changed=%d in %s",
+		considered, changed, time.Since(start).Round(time.Millisecond))
+}
+
+func displayPriceSource(s string) string {
+	if s == "" {
+		return DefaultPriceSourceURL
+	}
+	return s
 }
 
 func (w *Worker) todayLoop(ctx context.Context) {

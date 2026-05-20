@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE INDEX IF NOT EXISTS idx_api_keys_user   ON api_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix);
 
+CREATE TABLE IF NOT EXISTS model_prices (
+    model_prefix          TEXT             NOT NULL,
+    valid_from            TIMESTAMPTZ      NOT NULL,
+    valid_to              TIMESTAMPTZ,             -- NULL = currently in effect
+    input_per_1m          DOUBLE PRECISION NOT NULL,
+    output_per_1m         DOUBLE PRECISION NOT NULL,
+    cache_creation_per_1m DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cache_read_per_1m     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    source                TEXT             NOT NULL DEFAULT 'manual',
+    fetched_at            TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (model_prefix, valid_from)
+);
+CREATE INDEX IF NOT EXISTS idx_model_prices_active ON model_prices(model_prefix) WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS idx_model_prices_range  ON model_prices(model_prefix, valid_from);
+
 CREATE TABLE IF NOT EXISTS usage_detail (
     message_id            TEXT        NOT NULL,
     request_id            TEXT        NOT NULL DEFAULT '',
@@ -243,6 +258,169 @@ func (s *Store) Insert(ctx context.Context, machineID, userID string, recs []typ
 	return int(accepted), int(considered - accepted), nil
 }
 
+// ----- model_prices CRUD ----------------------------------------------------
+
+type PriceRow struct {
+	ModelPrefix   string
+	ValidFrom     time.Time
+	ValidTo       *time.Time
+	InputPer1M    float64
+	OutputPer1M   float64
+	CacheCreate1M float64
+	CacheRead1M   float64
+	Source        string
+	FetchedAt     time.Time
+}
+
+// UpsertPrice writes a new price row IF rates differ from the current
+// active row for the same model_prefix. Returns true if a change was
+// recorded. Idempotent: re-syncing identical prices is a no-op.
+func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		curIn, curOut, curCC, curCR float64
+		found                       bool
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT input_per_1m, output_per_1m, cache_creation_per_1m, cache_read_per_1m
+		FROM model_prices
+		WHERE model_prefix = $1 AND valid_to IS NULL
+	`, p.ModelPrefix).Scan(&curIn, &curOut, &curCC, &curCR)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		found = false
+	case err != nil:
+		return false, err
+	default:
+		found = true
+	}
+	if found && curIn == p.InputPer1M && curOut == p.OutputPer1M &&
+		curCC == p.CacheCreate1M && curCR == p.CacheRead1M {
+		return false, nil // unchanged
+	}
+	if found {
+		if _, err := tx.Exec(ctx, `
+			UPDATE model_prices SET valid_to = NOW()
+			WHERE model_prefix = $1 AND valid_to IS NULL
+		`, p.ModelPrefix); err != nil {
+			return false, err
+		}
+	}
+	from := p.ValidFrom
+	if from.IsZero() {
+		from = time.Now()
+	}
+	src := p.Source
+	if src == "" {
+		src = "manual"
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO model_prices
+		    (model_prefix, valid_from, input_per_1m, output_per_1m,
+		     cache_creation_per_1m, cache_read_per_1m, source, fetched_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		ON CONFLICT (model_prefix, valid_from) DO UPDATE SET
+		    input_per_1m = EXCLUDED.input_per_1m,
+		    output_per_1m = EXCLUDED.output_per_1m,
+		    cache_creation_per_1m = EXCLUDED.cache_creation_per_1m,
+		    cache_read_per_1m = EXCLUDED.cache_read_per_1m,
+		    source = EXCLUDED.source,
+		    fetched_at = NOW()
+	`, p.ModelPrefix, from, p.InputPer1M, p.OutputPer1M,
+		p.CacheCreate1M, p.CacheRead1M, src); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// ListActivePrices returns the currently-in-effect price for each model.
+func (s *Store) ListActivePrices(ctx context.Context) ([]PriceRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT model_prefix, valid_from, valid_to,
+		       input_per_1m, output_per_1m,
+		       cache_creation_per_1m, cache_read_per_1m,
+		       source, fetched_at
+		FROM model_prices
+		WHERE valid_to IS NULL
+		ORDER BY model_prefix
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPriceRows(rows)
+}
+
+// ListPriceHistory returns every price row (active + historical) for the
+// given prefix, ordered oldest-first. Empty prefix returns all models.
+func (s *Store) ListPriceHistory(ctx context.Context, modelPrefix string) ([]PriceRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT model_prefix, valid_from, valid_to,
+		       input_per_1m, output_per_1m,
+		       cache_creation_per_1m, cache_read_per_1m,
+		       source, fetched_at
+		FROM model_prices
+		WHERE ($1 = '' OR model_prefix = $1)
+		ORDER BY model_prefix, valid_from
+	`, modelPrefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPriceRows(rows)
+}
+
+func scanPriceRows(rows pgx.Rows) ([]PriceRow, error) {
+	var out []PriceRow
+	for rows.Next() {
+		var r PriceRow
+		if err := rows.Scan(&r.ModelPrefix, &r.ValidFrom, &r.ValidTo,
+			&r.InputPer1M, &r.OutputPer1M,
+			&r.CacheCreate1M, &r.CacheRead1M,
+			&r.Source, &r.FetchedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SeedDefaultPrices inserts the in-memory default rates with a very-old
+// valid_from if and only if model_prices is empty. This guarantees
+// /summary's LATERAL JOIN always finds a price even before the first
+// LiteLLM sync runs.
+func (s *Store) SeedDefaultPrices(ctx context.Context, defaults map[string]Rate) error {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM model_prices`).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for prefix, r := range defaults {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO model_prices
+			    (model_prefix, valid_from, input_per_1m, output_per_1m,
+			     cache_creation_per_1m, cache_read_per_1m, source, fetched_at)
+			VALUES ($1, '1970-01-01 00:00:00+00', $2, $3, $4, $5, 'default-seed', NOW())
+			ON CONFLICT DO NOTHING
+		`, prefix, r.Input, r.Output, r.CacheCreation, r.CacheRead); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 // RebuildDaily replaces every usage_daily row whose `day` falls in [from, to]
 // (UTC, both inclusive) with a fresh aggregate computed from usage_detail.
 // Returns the number of daily rows written.
@@ -298,22 +476,49 @@ type AggRow struct {
 	CacheCC  int64
 	CacheRR  int64
 	Messages int64
+	Cost     float64 // time-aware cost computed in SQL using model_prices valid on Day
 }
 
-// Aggregate returns per-day per-user per-tool per-model token totals (UTC days),
-// served straight off the pre-aggregated usage_daily table.
+// Aggregate returns per-day per-user per-tool per-model token totals (UTC
+// days) with time-aware cost. For each daily row, a LATERAL subquery
+// looks up the model_prices entry that was valid on that day (longest
+// matching prefix, latest valid_from) — so changing today's prices does
+// not retroactively re-price historical rows. If no price is registered,
+// cost is 0 (and the caller may fall back to the in-memory Pricer).
 func (s *Store) Aggregate(ctx context.Context, user string, from, to time.Time) ([]AggRow, error) {
-	q := `SELECT to_char(day, 'YYYY-MM-DD') AS day_s,
-                 user_id, tool, model,
-                 SUM(input_tokens), SUM(output_tokens),
-                 SUM(cache_creation_tokens), SUM(cache_read_tokens),
-                 SUM(messages)
-          FROM usage_daily
-          WHERE ($1 = '' OR user_id = $1)
-            AND ($2::date IS NULL OR day >= $2)
-            AND ($3::date IS NULL OR day <  $3)
-          GROUP BY day, user_id, tool, model
-          ORDER BY day DESC, user_id, tool, model`
+	q := `
+SELECT to_char(d.day, 'YYYY-MM-DD')                       AS day_s,
+       d.user_id, d.tool, d.model,
+       SUM(d.input_tokens),
+       SUM(d.output_tokens),
+       SUM(d.cache_creation_tokens),
+       SUM(d.cache_read_tokens),
+       SUM(d.messages),
+       COALESCE(
+         SUM(d.input_tokens          * p.input_per_1m         ) / 1000000.0, 0) +
+       COALESCE(
+         SUM(d.output_tokens         * p.output_per_1m        ) / 1000000.0, 0) +
+       COALESCE(
+         SUM(d.cache_creation_tokens * p.cache_creation_per_1m) / 1000000.0, 0) +
+       COALESCE(
+         SUM(d.cache_read_tokens     * p.cache_read_per_1m    ) / 1000000.0, 0) AS cost_usd
+FROM usage_daily d
+LEFT JOIN LATERAL (
+    SELECT mp.input_per_1m, mp.output_per_1m,
+           mp.cache_creation_per_1m, mp.cache_read_per_1m
+    FROM model_prices mp
+    WHERE d.model LIKE mp.model_prefix || '%'
+      AND mp.valid_from <= (d.day::timestamptz + interval '1 day')
+      AND (mp.valid_to IS NULL OR mp.valid_to > d.day::timestamptz)
+    ORDER BY length(mp.model_prefix) DESC, mp.valid_from DESC
+    LIMIT 1
+) p ON TRUE
+WHERE ($1 = '' OR d.user_id = $1)
+  AND ($2::date IS NULL OR d.day >= $2)
+  AND ($3::date IS NULL OR d.day <  $3)
+GROUP BY d.day, d.user_id, d.tool, d.model
+ORDER BY d.day DESC, d.user_id, d.tool, d.model
+`
 	var fromArg, toArg any
 	if !from.IsZero() {
 		fromArg = from.UTC()
@@ -329,7 +534,8 @@ func (s *Store) Aggregate(ctx context.Context, user string, from, to time.Time) 
 	var out []AggRow
 	for rows.Next() {
 		var r AggRow
-		if err := rows.Scan(&r.Day, &r.User, &r.Tool, &r.Model, &r.Input, &r.Output, &r.CacheCC, &r.CacheRR, &r.Messages); err != nil {
+		if err := rows.Scan(&r.Day, &r.User, &r.Tool, &r.Model,
+			&r.Input, &r.Output, &r.CacheCC, &r.CacheRR, &r.Messages, &r.Cost); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

@@ -16,6 +16,17 @@ type Rate struct {
 	CacheRead     float64 `json:"cache_read"`
 }
 
+// DefaultRates returns a copy of the in-memory price table used as the
+// initial seed for model_prices and as a fallback for models not yet
+// known to the DB (e.g. brand-new SKU between LiteLLM syncs).
+func DefaultRates() map[string]Rate {
+	out := make(map[string]Rate, len(defaultRates))
+	for k, v := range defaultRates {
+		out[k] = v
+	}
+	return out
+}
+
 // defaultRates: keys are model-name prefixes. Longest prefix wins.
 // Anthropic numbers are public list; OpenAI numbers are public list too
 // except GPT-5.x which is approximate (override with --pricing JSON).

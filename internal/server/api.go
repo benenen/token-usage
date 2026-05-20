@@ -24,6 +24,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/ingest", a.handleIngest)
 	mux.HandleFunc("/summary", a.handleSummary)
 	mux.HandleFunc("/users", a.handleUsers)
+	mux.HandleFunc("/prices", a.handlePrices)
 	mux.HandleFunc("/healthz", a.handleHealth)
 	mux.Handle("/", webHandler())
 }
@@ -118,6 +119,14 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]summaryRow, 0, len(rows))
 	for _, row := range rows {
+		// Cost is computed in SQL via time-aware lookup against
+		// model_prices. Fall back to the in-memory Pricer for models
+		// not yet known to the price table (e.g. brand-new SKU before
+		// the next litellm sync, or a custom Codex variant).
+		cost := row.Cost
+		if cost == 0 {
+			cost = a.Pricer.Cost(row.Model, row.Input, row.Output, row.CacheCC, row.CacheRR)
+		}
 		out = append(out, summaryRow{
 			Day:      row.Day,
 			User:     row.User,
@@ -129,7 +138,7 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 			CacheRR:  row.CacheRR,
 			Total:    row.Input + row.Output + row.CacheCC + row.CacheRR,
 			Messages: row.Messages,
-			Cost:     a.Pricer.Cost(row.Model, row.Input, row.Output, row.CacheCC, row.CacheRR),
+			Cost:     cost,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -161,6 +170,63 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 			Email:     u.Email,
 			CreatedAt: u.CreatedAt.UTC().Format(time.RFC3339),
 			Disabled:  u.Disabled,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+type priceView struct {
+	Model         string  `json:"model_prefix"`
+	ValidFrom     string  `json:"valid_from"`
+	ValidTo       string  `json:"valid_to,omitempty"`
+	InputPer1M    float64 `json:"input_per_1m"`
+	OutputPer1M   float64 `json:"output_per_1m"`
+	CacheCreate1M float64 `json:"cache_creation_per_1m"`
+	CacheRead1M   float64 `json:"cache_read_per_1m"`
+	Source        string  `json:"source"`
+}
+
+// /prices?model=<prefix>&active=1
+//
+//	default       -> full history for every model
+//	?active=1     -> only the currently-in-effect row per model
+//	?model=foo    -> filter to that model's prefix
+func (a *API) handlePrices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	var (
+		rows []PriceRow
+		err  error
+	)
+	if q.Get("active") == "1" {
+		rows, err = a.Store.ListActivePrices(r.Context())
+	} else {
+		rows, err = a.Store.ListPriceHistory(r.Context(), q.Get("model"))
+	}
+	if err != nil {
+		log.Printf("prices list error: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]priceView, 0, len(rows))
+	for _, p := range rows {
+		var to string
+		if p.ValidTo != nil {
+			to = p.ValidTo.UTC().Format(time.RFC3339)
+		}
+		out = append(out, priceView{
+			Model:         p.ModelPrefix,
+			ValidFrom:     p.ValidFrom.UTC().Format(time.RFC3339),
+			ValidTo:       to,
+			InputPer1M:    p.InputPer1M,
+			OutputPer1M:   p.OutputPer1M,
+			CacheCreate1M: p.CacheCreate1M,
+			CacheRead1M:   p.CacheRead1M,
+			Source:        p.Source,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
