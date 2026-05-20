@@ -272,9 +272,30 @@ type PriceRow struct {
 	FetchedAt     time.Time
 }
 
-// UpsertPrice writes a new price row IF rates differ from the current
-// active row for the same model_prefix. Returns true if a change was
-// recorded. Idempotent: re-syncing identical prices is a no-op.
+// epoch is the synthetic valid_from used for "this price has been in
+// effect since forever". When LiteLLM sees a model for the first time
+// we backfill to 1970 so existing usage data is priced at real (not
+// stale-default) rates from the get-go — that's the difference between
+// our /summary and a fresh `ccusage` run.
+var epoch = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// UpsertPrice writes a new price row when rates differ from the current
+// active row for the same model_prefix. Three cases:
+//
+//  1. No active row for the prefix yet → INSERT with valid_from=epoch.
+//     The new price covers all historical usage (matches ccusage's
+//     "current LiteLLM price for all data" behavior on first sync).
+//
+//  2. Active row exists and is a default-seed placeholder → UPDATE in
+//     place (replace the seed, keep its valid_from=epoch). Default
+//     seeds are stand-ins for "we don't know yet"; once we have real
+//     data, the placeholder should vanish silently.
+//
+//  3. Active row is a real LiteLLM/manual entry whose rates changed →
+//     close it (valid_to=NOW) and INSERT a new row (valid_from=NOW).
+//     This is the only path that produces a price-change history step.
+//
+// Identical rates → no-op (idempotent).
 func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -284,13 +305,14 @@ func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 
 	var (
 		curIn, curOut, curCC, curCR float64
+		curSource                   string
 		found                       bool
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT input_per_1m, output_per_1m, cache_creation_per_1m, cache_read_per_1m
+		SELECT input_per_1m, output_per_1m, cache_creation_per_1m, cache_read_per_1m, source
 		FROM model_prices
 		WHERE model_prefix = $1 AND valid_to IS NULL
-	`, p.ModelPrefix).Scan(&curIn, &curOut, &curCC, &curCR)
+	`, p.ModelPrefix).Scan(&curIn, &curOut, &curCC, &curCR, &curSource)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		found = false
@@ -301,8 +323,37 @@ func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 	}
 	if found && curIn == p.InputPer1M && curOut == p.OutputPer1M &&
 		curCC == p.CacheCreate1M && curCR == p.CacheRead1M {
-		return false, nil // unchanged
+		return false, nil
 	}
+	src := p.Source
+	if src == "" {
+		src = "manual"
+	}
+
+	// Case 2: replace a default-seed in place.
+	if found && curSource == "default-seed" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE model_prices SET
+			    input_per_1m = $2, output_per_1m = $3,
+			    cache_creation_per_1m = $4, cache_read_per_1m = $5,
+			    source = $6, fetched_at = NOW()
+			WHERE model_prefix = $1 AND valid_to IS NULL
+		`, p.ModelPrefix, p.InputPer1M, p.OutputPer1M,
+			p.CacheCreate1M, p.CacheRead1M, src); err != nil {
+			return false, err
+		}
+		return true, tx.Commit(ctx)
+	}
+
+	// Case 1: first authoritative price for this prefix.
+	from := p.ValidFrom
+	if !found {
+		from = epoch
+	} else if from.IsZero() {
+		from = time.Now() // Case 3 default
+	}
+
+	// Case 3: close the old version, then insert the new one below.
 	if found {
 		if _, err := tx.Exec(ctx, `
 			UPDATE model_prices SET valid_to = NOW()
@@ -311,14 +362,7 @@ func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 			return false, err
 		}
 	}
-	from := p.ValidFrom
-	if from.IsZero() {
-		from = time.Now()
-	}
-	src := p.Source
-	if src == "" {
-		src = "manual"
-	}
+
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO model_prices
 		    (model_prefix, valid_from, input_per_1m, output_per_1m,
