@@ -50,7 +50,7 @@ clean:
 # Docker remote-API version negotiation (some skopeo builds ship with an
 # older client lib than the daemon's minimum API).
 DOCKER_PREPULL_IMAGES := \
-	docker.io/library/golang:1.22-alpine \
+	docker.io/library/golang:1.23-alpine \
 	gcr.io/distroless/static-debian12:nonroot \
 	docker.io/docker/dockerfile:1.7
 

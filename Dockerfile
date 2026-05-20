@@ -4,7 +4,7 @@
 # and are distributed as plain binaries via the GitHub Release.
 
 # ----- build stage: cross-compile the server for $TARGETPLATFORM -----
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
 
