@@ -1,0 +1,92 @@
+package server
+
+import (
+	"encoding/json"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+)
+
+// Rate is per-1M-tokens USD.
+type Rate struct {
+	Input         float64 `json:"input"`
+	Output        float64 `json:"output"`
+	CacheCreation float64 `json:"cache_creation"`
+	CacheRead     float64 `json:"cache_read"`
+}
+
+// defaultRates: keys are model-name prefixes. Longest prefix wins.
+// Numbers track Anthropic public pricing; adjust via --pricing JSON.
+var defaultRates = map[string]Rate{
+	"claude-opus-4":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheRead: 1.50},
+	"claude-sonnet-4":   {Input: 3, Output: 15, CacheCreation: 3.75, CacheRead: 0.30},
+	"claude-haiku-4":    {Input: 1, Output: 5, CacheCreation: 1.25, CacheRead: 0.10},
+	"claude-3-5-sonnet": {Input: 3, Output: 15, CacheCreation: 3.75, CacheRead: 0.30},
+	"claude-3-5-haiku":  {Input: 0.80, Output: 4, CacheCreation: 1.00, CacheRead: 0.08},
+	"claude-3-opus":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheRead: 1.50},
+	"claude-3-haiku":    {Input: 0.25, Output: 1.25, CacheCreation: 0.30, CacheRead: 0.03},
+}
+
+type Pricer struct {
+	mu       sync.RWMutex
+	rates    map[string]Rate
+	prefixes []string // sorted by length desc for longest-prefix match
+}
+
+func NewPricer(path string) (*Pricer, error) {
+	p := &Pricer{rates: make(map[string]Rate)}
+	for k, v := range defaultRates {
+		p.rates[k] = v
+	}
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var custom map[string]Rate
+		if err := json.Unmarshal(data, &custom); err != nil {
+			return nil, err
+		}
+		for k, v := range custom {
+			p.rates[k] = v
+		}
+	}
+	p.reindex()
+	return p, nil
+}
+
+func (p *Pricer) reindex() {
+	p.prefixes = p.prefixes[:0]
+	for k := range p.rates {
+		p.prefixes = append(p.prefixes, k)
+	}
+	sort.Slice(p.prefixes, func(i, j int) bool {
+		return len(p.prefixes[i]) > len(p.prefixes[j])
+	})
+}
+
+// Cost returns USD for the given token counts under the given model.
+// Returns 0 if no matching rate exists (caller can flag as unknown model).
+func (p *Pricer) Cost(model string, in, out, cc, cr int64) float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	r, ok := p.rates[model]
+	if !ok {
+		for _, prefix := range p.prefixes {
+			if strings.HasPrefix(model, prefix) {
+				r = p.rates[prefix]
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return 0
+	}
+	const per = 1_000_000.0
+	return float64(in)*r.Input/per +
+		float64(out)*r.Output/per +
+		float64(cc)*r.CacheCreation/per +
+		float64(cr)*r.CacheRead/per
+}
