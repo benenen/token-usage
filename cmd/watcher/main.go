@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"tokenusage/cmd/watcher/install"
 	"tokenusage/internal/watcher"
 )
 
@@ -74,9 +75,9 @@ Subcommands:
 
 	root.AddCommand(
 		runCmd,
-		newInstallCmd(home, stateDir),
-		newUninstallCmd(home),
-		newStatusCmd(home),
+		install.NewInstallCmd(),
+		install.NewUninstallCmd(),
+		install.NewStatusCmd(),
 	)
 	return root
 }
