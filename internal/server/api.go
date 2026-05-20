@@ -89,6 +89,7 @@ func extractBearer(h string) string {
 type summaryRow struct {
 	Day      string  `json:"day"`
 	User     string  `json:"user"`
+	Tool     string  `json:"tool"`
 	Model    string  `json:"model"`
 	Input    int64   `json:"input_tokens"`
 	Output   int64   `json:"output_tokens"`
@@ -119,6 +120,7 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 		out = append(out, summaryRow{
 			Day:      row.Day,
 			User:     row.User,
+			Tool:     row.Tool,
 			Model:    row.Model,
 			Input:    row.Input,
 			Output:   row.Output,

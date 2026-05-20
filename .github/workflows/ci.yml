@@ -1,0 +1,30 @@
+name: CI
+
+# No untrusted ${{ github.event.* }} interpolation in this file —
+# every run: command uses only static strings.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -timeout 60s ./...
+      - name: build (both binaries)
+        run: |
+          go build -trimpath -o bin/token-usage-server  ./cmd/server
+          go build -trimpath -o bin/token-usage-watcher ./cmd/watcher

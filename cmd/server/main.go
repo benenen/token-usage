@@ -26,6 +26,9 @@ func runServer() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dsn := flag.String("dsn", os.Getenv("TOKENUSAGE_DSN"), "PostgreSQL DSN, e.g. postgres://user:pass@host:5432/tokenusage?sslmode=disable")
 	pricePath := flag.String("pricing", os.Getenv("TOKENUSAGE_PRICING"), "optional pricing override JSON")
+	rebuildToday := flag.Duration("rebuild-today-every", 10*time.Minute, "how often to recompute today's usage_daily rows; 0 disables")
+	rebuildDeepHour := flag.Int("rebuild-deep-hour", 8, "local-clock hour (0-23) for the daily deep rebuild; -1 disables")
+	rebuildDeepDays := flag.Int("rebuild-deep-days", 3, "how many days back (incl. today) the deep rebuild covers")
 	flag.Parse()
 
 	if *dsn == "" {
@@ -49,6 +52,14 @@ func runServer() {
 	api := &server.API{Store: store, Pricer: pricer}
 	mux := http.NewServeMux()
 	api.Register(mux)
+
+	worker := &server.Worker{
+		Store:      store,
+		TodayEvery: *rebuildToday,
+		DeepHour:   *rebuildDeepHour,
+		DeepDays:   *rebuildDeepDays,
+	}
+	worker.Start(ctx)
 
 	srv := &http.Server{
 		Addr:              *addr,

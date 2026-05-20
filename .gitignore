@@ -35,3 +35,5 @@ go.work.sum
 # Playwright session / screenshots from local dashboard testing
 /.playwright-mcp/
 tu-dashboard.png
+
+/*.png

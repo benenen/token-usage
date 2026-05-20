@@ -264,25 +264,32 @@ body::before {
   font-feature-settings: "tnum" 1, "zero" 1;
   line-height: 0.95;
   letter-spacing: -0.04em;
+  min-width: 0;          /* allow flex children to shrink past content size */
+  overflow: hidden;      /* never let the big number push the card wider */
 }
 .hero-big .currency {
-  font-size: 22px;
+  font-size: 18px;
   color: var(--text-dim);
-  margin-top: 12px; margin-right: 6px;
+  margin-top: 8px; margin-right: 5px;
+  flex: 0 0 auto;
 }
 .hero-big .amount {
-  font-size: clamp(56px, 8vw, 96px);
+  font-size: clamp(36px, 5vw, 64px);    /* shrunk from clamp(56, 8vw, 96) */
   color: var(--bone);
   background: linear-gradient(180deg, var(--bone) 0%, #d4cdb8 100%);
   -webkit-background-clip: text;
           background-clip: text;
   -webkit-text-fill-color: transparent;
+  white-space: nowrap;
+  min-width: 0;
 }
 .hero-big .cents {
-  font-size: 0.45em;
+  font-size: 0.5em;
   color: var(--text-dim);
   font-weight: 500;
   -webkit-text-fill-color: var(--text-dim);
+  letter-spacing: 0;
+  margin-left: 0.06em;
 }
 
 .hero-meta {

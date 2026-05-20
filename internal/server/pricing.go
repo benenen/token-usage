@@ -17,8 +17,11 @@ type Rate struct {
 }
 
 // defaultRates: keys are model-name prefixes. Longest prefix wins.
-// Numbers track Anthropic public pricing; adjust via --pricing JSON.
+// Anthropic numbers are public list; OpenAI numbers are public list too
+// except GPT-5.x which is approximate (override with --pricing JSON).
+// CacheCreation=0 for OpenAI: their prompt cache has no write-time charge.
 var defaultRates = map[string]Rate{
+	// Anthropic
 	"claude-opus-4":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheRead: 1.50},
 	"claude-sonnet-4":   {Input: 3, Output: 15, CacheCreation: 3.75, CacheRead: 0.30},
 	"claude-haiku-4":    {Input: 1, Output: 5, CacheCreation: 1.25, CacheRead: 0.10},
@@ -26,6 +29,15 @@ var defaultRates = map[string]Rate{
 	"claude-3-5-haiku":  {Input: 0.80, Output: 4, CacheCreation: 1.00, CacheRead: 0.08},
 	"claude-3-opus":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheRead: 1.50},
 	"claude-3-haiku":    {Input: 0.25, Output: 1.25, CacheCreation: 0.30, CacheRead: 0.03},
+
+	// OpenAI
+	"gpt-5":         {Input: 3, Output: 15, CacheCreation: 0, CacheRead: 0.30}, // approximate — override per your contract
+	"gpt-5-mini":    {Input: 0.30, Output: 1.20, CacheCreation: 0, CacheRead: 0.03},
+	"gpt-4o":        {Input: 2.50, Output: 10, CacheCreation: 0, CacheRead: 1.25},
+	"gpt-4o-mini":   {Input: 0.15, Output: 0.60, CacheCreation: 0, CacheRead: 0.075},
+	"gpt-4-turbo":   {Input: 10, Output: 30, CacheCreation: 0, CacheRead: 0},
+	"gpt-4":         {Input: 30, Output: 60, CacheCreation: 0, CacheRead: 0},
+	"gpt-3.5":       {Input: 0.50, Output: 1.50, CacheCreation: 0, CacheRead: 0},
 }
 
 type Pricer struct {

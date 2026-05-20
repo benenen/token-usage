@@ -1,0 +1,7 @@
+.git/
+.github/
+.playwright-mcp/
+bin/
+*.png
+/tmp/
+CLAUDE.md

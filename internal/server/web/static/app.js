@@ -24,6 +24,14 @@
     return fallbackUsed.get(model);
   }
 
+  // Tool palette — fixed swatches for known tools, fallback otherwise.
+  const TOOL_COLORS = {
+    "claude-code": "#ff5c1a",
+    "codex":       "#74aa9c",  // OpenAI mint
+    "opencode":    "#a1a5e8",
+  };
+  function colorForTool(t) { return TOOL_COLORS[t] || "#7a7466"; }
+
   // ---- formatters ---------------------------------------------------------
   const fmtUSD = (n) => {
     if (!isFinite(n)) return "—";
@@ -98,6 +106,7 @@
     chartWrap:    document.querySelector(".chart-wrap"),
     modelRank:    $("model-rank"),
     userRank:     $("user-rank"),
+    toolRank:     $("tool-rank"),
     ledgerBody:   document.querySelector("#ledger tbody"),
     ledgerHead:   document.querySelectorAll("#ledger thead th"),
     ledgerFilter: $("ledger-filter"),
@@ -186,11 +195,13 @@
     const byDay = aggregateByDay(state.rows);
     const byModel = aggregateBy(state.rows, "model");
     const byUser = aggregateBy(state.rows, "user");
+    const byTool = aggregateBy(state.rows, "tool");
 
     renderLegend(byModel);
     renderBars(byDay, byModel);
-    renderRank(els.modelRank, byModel, true);
-    renderRank(els.userRank, byUser, false);
+    renderRank(els.modelRank, byModel, "model");
+    renderRank(els.userRank, byUser, "none");
+    renderRank(els.toolRank, byTool, "tool");
     renderLedger();
   }
 
@@ -201,7 +212,7 @@
     els.totalCost.appendChild(el("span", { class: "cents" }, ".00"));
     [els.totalIn, els.totalOut, els.totalCw, els.totalCr, els.totalMsgs].forEach(e => e.textContent = "—");
     clear(els.legend); clear(els.svg); clear(els.yaxis);
-    clear(els.modelRank); clear(els.userRank); clear(els.ledgerBody);
+    clear(els.modelRank); clear(els.userRank); clear(els.toolRank); clear(els.ledgerBody);
     els.heroSavings.textContent = "";
     els.emptyEndpoint.textContent = `${location.protocol}//${location.host}/ingest`;
   }
@@ -433,16 +444,21 @@
   function hideTooltip() { els.tooltip.hidden = true; }
 
   // ---- rankings -----------------------------------------------------------
-  function renderRank(host, list, useColor) {
+  // mode: "model" | "tool" | "none" — controls swatch source and display text
+  function renderRank(host, list, mode) {
     clear(host);
     const max = list.length ? list[0].cost : 1;
     list.slice(0, 8).forEach((item, i) => {
       const pct = max > 0 ? (item.cost / max * 100) : 0;
       const nameChildren = [];
-      if (useColor) {
+      let display = item.name;
+      if (mode === "model") {
         nameChildren.push(el("span", { class: "swatch", style: `background:${colorFor(item.name)}` }));
+        display = shortenModel(item.name);
+      } else if (mode === "tool") {
+        nameChildren.push(el("span", { class: "swatch", style: `background:${colorForTool(item.name)}` }));
       }
-      nameChildren.push(document.createTextNode(useColor ? shortenModel(item.name) : item.name));
+      nameChildren.push(document.createTextNode(display));
       const li = el("li", null, [
         el("span", { class: "rk-num" }, String(i + 1).padStart(2, "0")),
         el("span", { class: "rk-name" }, nameChildren),

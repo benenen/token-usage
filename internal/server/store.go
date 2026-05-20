@@ -243,9 +243,55 @@ func (s *Store) Insert(ctx context.Context, machineID, userID string, recs []typ
 	return int(accepted), int(considered - accepted), nil
 }
 
+// RebuildDaily replaces every usage_daily row whose `day` falls in [from, to]
+// (UTC, both inclusive) with a fresh aggregate computed from usage_detail.
+// Returns the number of daily rows written.
+//
+// Concurrency: runs in a single tx. The DELETE acquires row-level locks
+// on the affected daily rows; concurrent /ingest UPSERTs to the same
+// (day, user, machine, tool, model) keys block until commit. After we
+// commit, the blocked UPSERT proceeds with += on top of our fresh row,
+// adding only its own delta — no double counting.
+func (s *Store) RebuildDaily(ctx context.Context, from, to time.Time) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM usage_daily WHERE day >= $1 AND day <= $2`,
+		from, to,
+	); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(ctx, `
+		INSERT INTO usage_daily (day, user_id, machine_id, tool, model,
+		    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		    messages, first_ts, last_ts, updated_at)
+		SELECT (ts AT TIME ZONE 'UTC')::date,
+		       user_id, machine_id, tool, model,
+		       SUM(input_tokens), SUM(output_tokens),
+		       SUM(cache_creation_tokens), SUM(cache_read_tokens),
+		       COUNT(*), MIN(ts), MAX(ts), NOW()
+		FROM usage_detail
+		WHERE (ts AT TIME ZONE 'UTC')::date >= $1
+		  AND (ts AT TIME ZONE 'UTC')::date <= $2
+		GROUP BY 1, 2, 3, 4, 5
+	`, from, to)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return res.RowsAffected(), nil
+}
+
 type AggRow struct {
 	Day      string
 	User     string
+	Tool     string
 	Model    string
 	Input    int64
 	Output   int64
@@ -254,11 +300,11 @@ type AggRow struct {
 	Messages int64
 }
 
-// Aggregate returns per-day per-user per-model token totals (UTC days),
+// Aggregate returns per-day per-user per-tool per-model token totals (UTC days),
 // served straight off the pre-aggregated usage_daily table.
 func (s *Store) Aggregate(ctx context.Context, user string, from, to time.Time) ([]AggRow, error) {
 	q := `SELECT to_char(day, 'YYYY-MM-DD') AS day_s,
-                 user_id, model,
+                 user_id, tool, model,
                  SUM(input_tokens), SUM(output_tokens),
                  SUM(cache_creation_tokens), SUM(cache_read_tokens),
                  SUM(messages)
@@ -266,8 +312,8 @@ func (s *Store) Aggregate(ctx context.Context, user string, from, to time.Time) 
           WHERE ($1 = '' OR user_id = $1)
             AND ($2::date IS NULL OR day >= $2)
             AND ($3::date IS NULL OR day <  $3)
-          GROUP BY day, user_id, model
-          ORDER BY day DESC, user_id, model`
+          GROUP BY day, user_id, tool, model
+          ORDER BY day DESC, user_id, tool, model`
 	var fromArg, toArg any
 	if !from.IsZero() {
 		fromArg = from.UTC()
@@ -283,7 +329,7 @@ func (s *Store) Aggregate(ctx context.Context, user string, from, to time.Time) 
 	var out []AggRow
 	for rows.Next() {
 		var r AggRow
-		if err := rows.Scan(&r.Day, &r.User, &r.Model, &r.Input, &r.Output, &r.CacheCC, &r.CacheRR, &r.Messages); err != nil {
+		if err := rows.Scan(&r.Day, &r.User, &r.Tool, &r.Model, &r.Input, &r.Output, &r.CacheCC, &r.CacheRR, &r.Messages); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
