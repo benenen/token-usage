@@ -97,6 +97,7 @@
     totalOut:     $("total-out"),
     totalCw:      $("total-cw"),
     totalCr:      $("total-cr"),
+    totalTok:     $("total-tok"),
     totalMsgs:    $("total-msgs"),
     heroSavings:  $("hero-savings"),
     legend:       $("legend"),
@@ -210,7 +211,7 @@
     clear(els.totalCost);
     els.totalCost.appendChild(document.createTextNode("0"));
     els.totalCost.appendChild(el("span", { class: "cents" }, ".00"));
-    [els.totalIn, els.totalOut, els.totalCw, els.totalCr, els.totalMsgs].forEach(e => e.textContent = "—");
+    [els.totalIn, els.totalOut, els.totalCw, els.totalCr, els.totalTok, els.totalMsgs].forEach(e => e.textContent = "—");
     clear(els.legend); clear(els.svg); clear(els.yaxis);
     clear(els.modelRank); clear(els.userRank); clear(els.toolRank); clear(els.ledgerBody);
     els.heroSavings.textContent = "";
@@ -235,7 +236,7 @@
 
   // ---- aggregation --------------------------------------------------------
   function aggregateTotals(rows) {
-    let cost = 0, input = 0, output = 0, cw = 0, cr = 0, msgs = 0;
+    let cost = 0, input = 0, output = 0, cw = 0, cr = 0, total = 0, msgs = 0;
     const modelSet = new Set();
     for (const r of rows) {
       cost   += r.cost_usd || 0;
@@ -243,10 +244,11 @@
       output += r.output_tokens || 0;
       cw     += r.cache_creation_tokens || 0;
       cr     += r.cache_read_tokens || 0;
+      total  += r.total_tokens || 0;     // server-computed
       msgs   += r.messages || 0;
       modelSet.add(r.model);
     }
-    return { cost, input, output, cw, cr, msgs, models: modelSet.size };
+    return { cost, input, output, cw, cr, total, msgs, models: modelSet.size };
   }
 
   function aggregateByDay(rows) {
@@ -283,6 +285,7 @@
     els.totalOut.textContent  = fmtTokens(t.output);
     els.totalCw.textContent   = fmtTokens(t.cw);
     els.totalCr.textContent   = fmtTokens(t.cr);
+    els.totalTok.textContent  = fmtTokens(t.total);
     els.totalMsgs.textContent = fmtInt(t.msgs);
 
     clear(els.heroSavings);
@@ -472,15 +475,14 @@
   // ---- ledger -------------------------------------------------------------
   function renderLedger() {
     let rows = state.rows.map(r => ({
-      day: r.day,
-      user: r.user,
-      model: r.model,
-      input: r.input_tokens || 0,
-      output: r.output_tokens || 0,
-      cw: r.cache_creation_tokens || 0,
-      cr: r.cache_read_tokens || 0,
-      msgs: r.messages || 0,
-      cost: r.cost_usd || 0,
+      day: r.day, user: r.user, model: r.model,
+      input:  r.input_tokens          || 0,
+      output: r.output_tokens         || 0,
+      cw:     r.cache_creation_tokens || 0,
+      cr:     r.cache_read_tokens     || 0,
+      total:  r.total_tokens          || 0,   // server-computed
+      msgs:   r.messages              || 0,
+      cost:   r.cost_usd              || 0,
     }));
     if (state.filter) {
       const q = state.filter;
@@ -517,6 +519,7 @@
       tr.appendChild(el("td", { class: "num" }, fmtTokens(r.output)));
       tr.appendChild(el("td", { class: "num" }, fmtTokens(r.cw)));
       tr.appendChild(el("td", { class: "num" }, fmtTokens(r.cr)));
+      tr.appendChild(el("td", { class: "num cost-cell" }, fmtTokens(r.total)));
       tr.appendChild(el("td", { class: "num" }, fmtInt(r.msgs)));
       tr.appendChild(el("td", { class: "num cost-cell" }, "$" + (r.cost >= 100 ? fmtUSD(r.cost) : r.cost.toFixed(2))));
       frag.appendChild(tr);

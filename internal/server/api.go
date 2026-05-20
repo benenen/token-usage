@@ -95,6 +95,7 @@ type summaryRow struct {
 	Output   int64   `json:"output_tokens"`
 	CacheCC  int64   `json:"cache_creation_tokens"`
 	CacheRR  int64   `json:"cache_read_tokens"`
+	Total    int64   `json:"total_tokens"` // derived: input + output + cache_creation + cache_read
 	Messages int64   `json:"messages"`
 	Cost     float64 `json:"cost_usd"`
 }
@@ -126,6 +127,7 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 			Output:   row.Output,
 			CacheCC:  row.CacheCC,
 			CacheRR:  row.CacheRR,
+			Total:    row.Input + row.Output + row.CacheCC + row.CacheRR,
 			Messages: row.Messages,
 			Cost:     a.Pricer.Cost(row.Model, row.Input, row.Output, row.CacheCC, row.CacheRR),
 		})
