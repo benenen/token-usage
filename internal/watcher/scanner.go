@@ -35,41 +35,56 @@ type rawUsage struct {
 	CacheRead     int64 `json:"cache_read_input_tokens"`
 }
 
+// Source binds a JSONL root directory to a tool name. One watcher can
+// fan over multiple sources; each scanned record carries its source's
+// Tool tag. Today the scanner only parses Claude Code's JSONL schema;
+// Codex / OpenCode parsers will land as new format branches later.
+type Source struct {
+	Tool string
+	Root string
+}
+
 type Scanner struct {
-	Root           string
+	Sources        []Source
 	Checkpoint     *Checkpoint
 	BackfillCutoff time.Duration // records older than now-cutoff are marked backfill=true
 }
 
-// Scan walks Root for *.jsonl files and returns all new records since the
-// last checkpoint, plus the new FileState per file. The caller must persist
-// the checkpoint only AFTER successfully uploading the records.
+// Scan walks every Source root for *.jsonl files and returns all new
+// records since the last checkpoint, plus the new FileState per file.
+// The caller must persist the checkpoint only AFTER successfully uploading.
 func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 	pending := make(map[string]FileState)
 	var out []types.UsageRecord
-	walkErr := filepath.WalkDir(s.Root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable subtrees
-		}
-		if d.IsDir() || filepath.Ext(path) != ".jsonl" {
+	var firstErr error
+	for _, src := range s.Sources {
+		err := filepath.WalkDir(src.Root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil // skip unreadable subtrees
+			}
+			if d.IsDir() || filepath.Ext(path) != ".jsonl" {
+				return nil
+			}
+			recs, newState, scanErr := s.scanFile(path, src.Tool)
+			if scanErr != nil {
+				return nil
+			}
+			if len(recs) > 0 {
+				out = append(out, recs...)
+			}
+			if newState != nil {
+				pending[path] = *newState
+			}
 			return nil
+		})
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
-		recs, newState, scanErr := s.scanFile(path)
-		if scanErr != nil {
-			return nil
-		}
-		if len(recs) > 0 {
-			out = append(out, recs...)
-		}
-		if newState != nil {
-			pending[path] = *newState
-		}
-		return nil
-	})
-	return out, pending, walkErr
+	}
+	return out, pending, firstErr
 }
 
-func (s *Scanner) scanFile(path string) ([]types.UsageRecord, *FileState, error) {
+func (s *Scanner) scanFile(path, tool string) ([]types.UsageRecord, *FileState, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, nil, err
@@ -109,7 +124,7 @@ func (s *Scanner) scanFile(path string) ([]types.UsageRecord, *FileState, error)
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 && line[len(line)-1] == '\n' {
 			cur += int64(len(line))
-			if rec, ok := parseLine(line, project, s.BackfillCutoff, now); ok {
+			if rec, ok := parseLine(line, project, tool, s.BackfillCutoff, now); ok {
 				recs = append(recs, rec)
 			}
 		}
@@ -125,7 +140,7 @@ func (s *Scanner) scanFile(path string) ([]types.UsageRecord, *FileState, error)
 	return recs, &FileState{Inode: inode, Offset: cur}, nil
 }
 
-func parseLine(line []byte, project string, backfillCutoff time.Duration, now time.Time) (types.UsageRecord, bool) {
+func parseLine(line []byte, project, tool string, backfillCutoff time.Duration, now time.Time) (types.UsageRecord, bool) {
 	var raw rawLine
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return types.UsageRecord{}, false
@@ -150,6 +165,7 @@ func parseLine(line []byte, project string, backfillCutoff time.Duration, now ti
 		MessageID:           raw.Message.ID,
 		RequestID:           raw.RequestID,
 		SessionID:           raw.SessionID,
+		Tool:                tool,
 		Model:               raw.Message.Model,
 		Timestamp:           ts,
 		InputTokens:         raw.Message.Usage.Input,

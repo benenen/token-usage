@@ -1,0 +1,525 @@
+// TOKEN USAGE // observatory  —  vanilla JS dashboard
+// All dynamic rendering uses DOM APIs (createElement / textContent) — never innerHTML —
+// so server-supplied strings can never be parsed as HTML.
+(() => {
+  "use strict";
+
+  // ---- model color palette ------------------------------------------------
+  const MODEL_PALETTE = [
+    { test: /opus-4|opus-3/i,           color: "#ff5c1a" },
+    { test: /sonnet-4/i,                color: "#7ec7c2" },
+    { test: /haiku-4/i,                 color: "#e8c47e" },
+    { test: /3-5-sonnet|3\.5-sonnet/i,  color: "#5b8d8a" },
+    { test: /3-5-haiku|3\.5-haiku/i,    color: "#b89860" },
+    { test: /3-opus/i,                  color: "#c64b1a" },
+  ];
+  const FALLBACK_PALETTE = ["#d96e9a", "#7a9ec6", "#94c67e", "#c67e7e", "#7a7466"];
+  const fallbackUsed = new Map();
+
+  function colorFor(model) {
+    for (const m of MODEL_PALETTE) if (m.test.test(model)) return m.color;
+    if (!fallbackUsed.has(model)) {
+      fallbackUsed.set(model, FALLBACK_PALETTE[fallbackUsed.size % FALLBACK_PALETTE.length]);
+    }
+    return fallbackUsed.get(model);
+  }
+
+  // ---- formatters ---------------------------------------------------------
+  const fmtUSD = (n) => {
+    if (!isFinite(n)) return "—";
+    if (n >= 1000) return n.toLocaleString("en-US", { maximumFractionDigits: 0 });
+    return n.toFixed(2);
+  };
+  const fmtTokens = (n) => {
+    if (!isFinite(n) || n === 0) return "0";
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+    return n.toString();
+  };
+  const fmtInt = (n) => n.toLocaleString("en-US");
+  const shortenModel = (m) => m.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+  const NS_SVG = "http://www.w3.org/2000/svg";
+
+  // tiny DOM helper: el("div", {class: ...}, [children]) or text
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    if (attrs) for (const k in attrs) {
+      if (k === "class") node.className = attrs[k];
+      else if (k === "style") node.style.cssText = attrs[k];
+      else if (k.startsWith("data-")) node.setAttribute(k, attrs[k]);
+      else if (k.startsWith("on") && typeof attrs[k] === "function") node.addEventListener(k.slice(2), attrs[k]);
+      else node.setAttribute(k, attrs[k]);
+    }
+    if (children == null) return node;
+    if (!Array.isArray(children)) children = [children];
+    for (const c of children) {
+      if (c == null) continue;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    return node;
+  }
+  function svg(tag, attrs) {
+    const node = document.createElementNS(NS_SVG, tag);
+    if (attrs) for (const k in attrs) node.setAttribute(k, attrs[k]);
+    return node;
+  }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  // ---- state --------------------------------------------------------------
+  const state = {
+    rangeDays: 30,
+    user: "",
+    rows: [],
+    users: [],          // registered users (from /users); may include zero-data users
+    sortKey: "day",
+    sortDir: "desc",
+    filter: "",
+  };
+
+  // ---- DOM refs -----------------------------------------------------------
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    rpButtons:    document.querySelectorAll(".rp-btn"),
+    userSelect:   $("user-select"),
+    clock:        $("clock"),
+    heroRange:    $("hero-range"),
+    totalCost:    $("total-cost"),
+    totalIn:      $("total-in"),
+    totalOut:     $("total-out"),
+    totalCw:      $("total-cw"),
+    totalCr:      $("total-cr"),
+    totalMsgs:    $("total-msgs"),
+    heroSavings:  $("hero-savings"),
+    legend:       $("legend"),
+    svg:          $("bars"),
+    yaxis:        $("yaxis"),
+    tooltip:      $("tooltip"),
+    chartWrap:    document.querySelector(".chart-wrap"),
+    modelRank:    $("model-rank"),
+    userRank:     $("user-rank"),
+    ledgerBody:   document.querySelector("#ledger tbody"),
+    ledgerHead:   document.querySelectorAll("#ledger thead th"),
+    ledgerFilter: $("ledger-filter"),
+    emptyState:   $("empty-state"),
+    emptyEndpoint:$("empty-endpoint"),
+    lastFetch:    $("lastfetch"),
+  };
+
+  // ---- clock --------------------------------------------------------------
+  function tickClock() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const s = `${d.getFullYear()}·${pad(d.getMonth()+1)}·${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    clear(els.clock);
+    els.clock.appendChild(el("span", { class: "cur" }, "▍"));
+    els.clock.appendChild(document.createTextNode(" " + s));
+  }
+  setInterval(tickClock, 1000); tickClock();
+
+  // ---- fetch --------------------------------------------------------------
+  async function load() {
+    const params = new URLSearchParams();
+    if (state.user) params.set("user", state.user);
+    if (state.rangeDays > 0) {
+      const from = new Date(Date.now() - state.rangeDays * 86400_000);
+      params.set("from", from.toISOString());
+    }
+    const sumURL = "/summary" + (params.toString() ? "?" + params.toString() : "");
+    try {
+      const [sumRes, usrRes] = await Promise.all([
+        fetch(sumURL,   { headers: { accept: "application/json" }}),
+        fetch("/users", { headers: { accept: "application/json" }}),
+      ]);
+      if (!sumRes.ok) throw new Error("/summary HTTP " + sumRes.status);
+      state.rows = (await sumRes.json()) || [];
+      // /users is newer; gracefully degrade if it's missing.
+      state.users = usrRes.ok ? ((await usrRes.json()) || []) : [];
+    } catch (e) {
+      console.error("fetch failed", e);
+      els.lastFetch.textContent = "fetch failed @ " + new Date().toLocaleTimeString();
+      return;
+    }
+    els.lastFetch.textContent = "synced @ " + new Date().toLocaleTimeString();
+    render();
+  }
+
+  // ---- input handlers -----------------------------------------------------
+  els.rpButtons.forEach(btn => btn.addEventListener("click", () => {
+    els.rpButtons.forEach(b => b.classList.remove("is-active"));
+    btn.classList.add("is-active");
+    state.rangeDays = Number(btn.dataset.range);
+    const label = state.rangeDays === 0
+      ? "all-time"
+      : state.rangeDays === 1 ? "last 24h" : `last ${state.rangeDays} days`;
+    els.heroRange.textContent = label;
+    load();
+  }));
+
+  els.userSelect.addEventListener("change", () => {
+    state.user = els.userSelect.value;
+    load();
+  });
+
+  els.ledgerFilter.addEventListener("input", () => {
+    state.filter = els.ledgerFilter.value.toLowerCase();
+    renderLedger();
+  });
+
+  els.ledgerHead.forEach(th => th.addEventListener("click", () => {
+    const k = th.dataset.key;
+    if (!k) return;
+    if (state.sortKey === k) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
+    else { state.sortKey = k; state.sortDir = "desc"; }
+    renderLedger();
+  }));
+
+  // ---- render -------------------------------------------------------------
+  function render() {
+    renderUserOptions();
+    if (!state.rows.length) { renderEmpty(); return; }
+    els.emptyState.hidden = true;
+
+    const totals = aggregateTotals(state.rows);
+    renderHero(totals);
+
+    const byDay = aggregateByDay(state.rows);
+    const byModel = aggregateBy(state.rows, "model");
+    const byUser = aggregateBy(state.rows, "user");
+
+    renderLegend(byModel);
+    renderBars(byDay, byModel);
+    renderRank(els.modelRank, byModel, true);
+    renderRank(els.userRank, byUser, false);
+    renderLedger();
+  }
+
+  function renderEmpty() {
+    els.emptyState.hidden = false;
+    clear(els.totalCost);
+    els.totalCost.appendChild(document.createTextNode("0"));
+    els.totalCost.appendChild(el("span", { class: "cents" }, ".00"));
+    [els.totalIn, els.totalOut, els.totalCw, els.totalCr, els.totalMsgs].forEach(e => e.textContent = "—");
+    clear(els.legend); clear(els.svg); clear(els.yaxis);
+    clear(els.modelRank); clear(els.userRank); clear(els.ledgerBody);
+    els.heroSavings.textContent = "";
+    els.emptyEndpoint.textContent = `${location.protocol}//${location.host}/ingest`;
+  }
+
+  function renderUserOptions() {
+    // Merge registered users (some may have no data yet) with users-with-data,
+    // then sort. Annotate the no-data ones so the dropdown hints at it.
+    const withData = new Set(state.rows.map(r => r.user));
+    const registered = new Set(state.users.map(u => u.user_id));
+    const all = Array.from(new Set([...withData, ...registered])).sort();
+    const cur = els.userSelect.value;
+    clear(els.userSelect);
+    els.userSelect.appendChild(el("option", { value: "" }, `all (${all.length})`));
+    for (const u of all) {
+      const label = withData.has(u) ? u : u + " · no data";
+      els.userSelect.appendChild(el("option", { value: u }, label));
+    }
+    if (all.includes(cur)) els.userSelect.value = cur;
+  }
+
+  // ---- aggregation --------------------------------------------------------
+  function aggregateTotals(rows) {
+    let cost = 0, input = 0, output = 0, cw = 0, cr = 0, msgs = 0;
+    const modelSet = new Set();
+    for (const r of rows) {
+      cost   += r.cost_usd || 0;
+      input  += r.input_tokens || 0;
+      output += r.output_tokens || 0;
+      cw     += r.cache_creation_tokens || 0;
+      cr     += r.cache_read_tokens || 0;
+      msgs   += r.messages || 0;
+      modelSet.add(r.model);
+    }
+    return { cost, input, output, cw, cr, msgs, models: modelSet.size };
+  }
+
+  function aggregateByDay(rows) {
+    const m = new Map();
+    for (const r of rows) {
+      if (!m.has(r.day)) m.set(r.day, { day: r.day, byModel: {}, total: 0 });
+      const slot = m.get(r.day);
+      slot.byModel[r.model] = (slot.byModel[r.model] || 0) + (r.cost_usd || 0);
+      slot.total += (r.cost_usd || 0);
+    }
+    return Array.from(m.values()).sort((a, b) => a.day.localeCompare(b.day));
+  }
+
+  function aggregateBy(rows, key) {
+    const m = new Map();
+    for (const r of rows) {
+      const k = r[key];
+      if (!m.has(k)) m.set(k, { name: k, cost: 0, tokens: 0 });
+      const slot = m.get(k);
+      slot.cost   += r.cost_usd || 0;
+      slot.tokens += (r.input_tokens || 0) + (r.output_tokens || 0);
+    }
+    return Array.from(m.values()).sort((a, b) => b.cost - a.cost);
+  }
+
+  // ---- hero ---------------------------------------------------------------
+  function renderHero(t) {
+    const [whole, frac] = t.cost.toFixed(2).split(".");
+    clear(els.totalCost);
+    els.totalCost.appendChild(document.createTextNode(Number(whole).toLocaleString("en-US")));
+    els.totalCost.appendChild(el("span", { class: "cents" }, "." + frac));
+
+    els.totalIn.textContent   = fmtTokens(t.input);
+    els.totalOut.textContent  = fmtTokens(t.output);
+    els.totalCw.textContent   = fmtTokens(t.cw);
+    els.totalCr.textContent   = fmtTokens(t.cr);
+    els.totalMsgs.textContent = fmtInt(t.msgs);
+
+    clear(els.heroSavings);
+    if (t.cr > 0 && t.input > 0) {
+      const ratio = t.cr / (t.input + t.cr);
+      els.heroSavings.appendChild(el("strong", null, `${(ratio * 100).toFixed(0)}%`));
+      els.heroSavings.appendChild(document.createTextNode(
+        ` of read tokens came from cache · ≈${fmtTokens(t.cr * 0.9)} input-equivalents avoided`));
+    }
+  }
+
+  // ---- legend -------------------------------------------------------------
+  function renderLegend(models) {
+    const total = models.reduce((s, m) => s + m.cost, 0);
+    const top = models.slice(0, 6);
+    clear(els.legend);
+    for (const m of top) {
+      const pct = total > 0 ? (m.cost / total * 100).toFixed(0) : "0";
+      const li = el("li", null, [
+        el("span", { class: "swatch", style: `background:${colorFor(m.name)}` }),
+        el("span", null, shortenModel(m.name)),
+        el("span", { class: "pct" }, `${pct}%`),
+      ]);
+      els.legend.appendChild(li);
+    }
+    if (models.length > 6) {
+      els.legend.appendChild(el("li", { class: "dim" }, `+ ${models.length - 6} more`));
+    }
+  }
+
+  // ---- bars (SVG stacked) -------------------------------------------------
+  function renderBars(byDay, byModel) {
+    clear(els.svg); clear(els.yaxis);
+    const W = els.svg.clientWidth || 800;
+    const H = els.svg.clientHeight || 260;
+    const padL = 44, padR = 8, padT = 14, padB = 26;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    if (!byDay.length) return;
+
+    const dense = densify(byDay, state.rangeDays);
+    const maxTotal = Math.max(...dense.map(d => d.total), 0.01);
+    const niceMax = niceCeil(maxTotal);
+
+    // y grid lines + labels
+    const steps = 4;
+    for (let i = 0; i <= steps; i++) {
+      const v = niceMax * (i / steps);
+      const div = el("div", { class: "gridline", style: `bottom:${(i / steps * 100)}%` });
+      div.appendChild(el("span", null, "$" + (v >= 100 ? v.toFixed(0) : v.toFixed(2))));
+      els.yaxis.appendChild(div);
+    }
+
+    const barGap = 2;
+    const bw = Math.max(2, (innerW / dense.length) - barGap);
+    const orderedModels = byModel.map(m => m.name); // hot models bottom
+
+    els.svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+    // baseline
+    els.svg.appendChild(svg("line", {
+      x1: padL, x2: W - padR,
+      y1: padT + innerH + 0.5, y2: padT + innerH + 0.5,
+      stroke: "#2a3140", "stroke-width": "1",
+    }));
+
+    dense.forEach((day, idx) => {
+      const x = padL + idx * (innerW / dense.length) + barGap / 2;
+      let yCursor = padT + innerH;
+      for (const model of orderedModels) {
+        const v = day.byModel[model] || 0;
+        if (v <= 0) continue;
+        const h = (v / niceMax) * innerH;
+        const rect = svg("rect", {
+          x: x.toFixed(2),
+          y: (yCursor - h).toFixed(2),
+          width: bw.toFixed(2),
+          height: h.toFixed(2),
+          fill: colorFor(model),
+          class: "bar-segment",
+        });
+        rect.addEventListener("mouseenter", (e) => showTooltip(e, day));
+        rect.addEventListener("mousemove",  (e) => moveTooltip(e));
+        rect.addEventListener("mouseleave", hideTooltip);
+        els.svg.appendChild(rect);
+        yCursor -= h;
+      }
+      const N = dense.length > 30 ? 7 : (dense.length > 14 ? 3 : 2);
+      if (idx % N === 0 || idx === dense.length - 1) {
+        const t = svg("text", {
+          x: (x + bw / 2).toFixed(2),
+          y: H - 8,
+          "text-anchor": "middle",
+          class: "bar-tick",
+        });
+        t.textContent = formatTickDate(day.day);
+        els.svg.appendChild(t);
+      }
+    });
+  }
+
+  function densify(byDay, rangeDays) {
+    if (rangeDays <= 0) return byDay;
+    const out = [];
+    const map = new Map(byDay.map(d => [d.day, d]));
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    for (let i = rangeDays - 1; i >= 0; i--) {
+      const d = new Date(today);
+      d.setUTCDate(today.getUTCDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      out.push(map.get(key) || { day: key, byModel: {}, total: 0 });
+    }
+    return out;
+  }
+
+  function niceCeil(v) {
+    if (v <= 0) return 1;
+    const pow = Math.pow(10, Math.floor(Math.log10(v)));
+    const n = v / pow;
+    const nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return nice * pow;
+  }
+
+  function formatTickDate(iso) {
+    const [, m, d] = iso.split("-");
+    return `${m}·${d}`;
+  }
+
+  // ---- tooltip ------------------------------------------------------------
+  function showTooltip(e, day) {
+    const t = els.tooltip;
+    clear(t);
+    t.appendChild(el("div", { class: "tt-day" }, day.day));
+    const entries = Object.entries(day.byModel).sort((a, b) => b[1] - a[1]);
+    for (const [m, v] of entries) {
+      t.appendChild(el("div", { class: "tt-row" }, [
+        el("span", { class: "tt-sw", style: `background:${colorFor(m)}` }),
+        el("span", { class: "tt-mdl" }, shortenModel(m)),
+        el("span", { class: "tt-val" }, "$" + v.toFixed(2)),
+      ]));
+    }
+    t.appendChild(el("div", { class: "tt-total" }, [
+      el("span", null, "TOTAL"),
+      el("span", null, "$" + day.total.toFixed(2)),
+    ]));
+    t.hidden = false;
+    moveTooltip(e);
+  }
+  function moveTooltip(e) {
+    const t = els.tooltip;
+    const wrap = els.chartWrap.getBoundingClientRect();
+    const x = e.clientX - wrap.left + 12;
+    const y = e.clientY - wrap.top + 12;
+    const max = wrap.width - t.offsetWidth - 8;
+    t.style.left = Math.min(x, max) + "px";
+    t.style.top  = y + "px";
+  }
+  function hideTooltip() { els.tooltip.hidden = true; }
+
+  // ---- rankings -----------------------------------------------------------
+  function renderRank(host, list, useColor) {
+    clear(host);
+    const max = list.length ? list[0].cost : 1;
+    list.slice(0, 8).forEach((item, i) => {
+      const pct = max > 0 ? (item.cost / max * 100) : 0;
+      const nameChildren = [];
+      if (useColor) {
+        nameChildren.push(el("span", { class: "swatch", style: `background:${colorFor(item.name)}` }));
+      }
+      nameChildren.push(document.createTextNode(useColor ? shortenModel(item.name) : item.name));
+      const li = el("li", null, [
+        el("span", { class: "rk-num" }, String(i + 1).padStart(2, "0")),
+        el("span", { class: "rk-name" }, nameChildren),
+        el("span", { class: "rk-val" }, "$" + fmtUSD(item.cost)),
+        el("span", { class: "rk-bar" }, el("i", { style: `width:${pct.toFixed(1)}%` })),
+      ]);
+      host.appendChild(li);
+    });
+  }
+
+  // ---- ledger -------------------------------------------------------------
+  function renderLedger() {
+    let rows = state.rows.map(r => ({
+      day: r.day,
+      user: r.user,
+      model: r.model,
+      input: r.input_tokens || 0,
+      output: r.output_tokens || 0,
+      cw: r.cache_creation_tokens || 0,
+      cr: r.cache_read_tokens || 0,
+      msgs: r.messages || 0,
+      cost: r.cost_usd || 0,
+    }));
+    if (state.filter) {
+      const q = state.filter;
+      rows = rows.filter(r =>
+        r.user.toLowerCase().includes(q) ||
+        r.model.toLowerCase().includes(q) ||
+        r.day.includes(q));
+    }
+    const dir = state.sortDir === "asc" ? 1 : -1;
+    const k = state.sortKey;
+    rows.sort((a, b) => {
+      const av = a[k], bv = b[k];
+      if (typeof av === "string") return av.localeCompare(bv) * dir;
+      return (av - bv) * dir;
+    });
+
+    els.ledgerHead.forEach(th => {
+      th.classList.toggle("is-sorted", th.dataset.key === k);
+      th.classList.toggle("asc", th.dataset.key === k && state.sortDir === "asc");
+    });
+
+    clear(els.ledgerBody);
+    const frag = document.createDocumentFragment();
+    rows.slice(0, 500).forEach(r => {
+      const tr = document.createElement("tr");
+      tr.appendChild(el("td", null, r.day));
+      tr.appendChild(el("td", null, r.user));
+      const modelTd = el("td", { class: "model-cell" }, [
+        el("span", { class: "swatch", style: `background:${colorFor(r.model)}` }),
+        document.createTextNode(shortenModel(r.model)),
+      ]);
+      tr.appendChild(modelTd);
+      tr.appendChild(el("td", { class: "num" }, fmtTokens(r.input)));
+      tr.appendChild(el("td", { class: "num" }, fmtTokens(r.output)));
+      tr.appendChild(el("td", { class: "num" }, fmtTokens(r.cw)));
+      tr.appendChild(el("td", { class: "num" }, fmtTokens(r.cr)));
+      tr.appendChild(el("td", { class: "num" }, fmtInt(r.msgs)));
+      tr.appendChild(el("td", { class: "num cost-cell" }, "$" + (r.cost >= 100 ? fmtUSD(r.cost) : r.cost.toFixed(2))));
+      frag.appendChild(tr);
+    });
+    els.ledgerBody.appendChild(frag);
+  }
+
+  // ---- boot ---------------------------------------------------------------
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    if (!state.rows.length) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const byDay = aggregateByDay(state.rows);
+      const byModel = aggregateBy(state.rows, "model");
+      renderBars(byDay, byModel);
+    }, 120);
+  });
+
+  setInterval(load, 30_000);
+  load();
+})();

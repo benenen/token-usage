@@ -18,8 +18,7 @@ import (
 type Uploader struct {
 	Endpoint  string
 	MachineID string
-	UserID    string
-	AuthToken string // optional
+	APIKey    string // tuk_… key; sent as Authorization: Bearer header. Required.
 	Client    *http.Client
 	BufferDir string // if non-empty, failed batches are written here for later retry
 }
@@ -33,7 +32,6 @@ func (u *Uploader) Send(ctx context.Context, recs []types.UsageRecord) error {
 	}
 	body, err := json.Marshal(types.IngestRequest{
 		MachineID: u.MachineID,
-		UserID:    u.UserID,
 		Records:   recs,
 	})
 	if err != nil {
@@ -58,8 +56,8 @@ func (u *Uploader) post(ctx context.Context, body []byte) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if u.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+u.AuthToken)
+	if u.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+u.APIKey)
 	}
 	resp, err := u.Client.Do(req)
 	if err != nil {

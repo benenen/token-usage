@@ -9,6 +9,7 @@ type UsageRecord struct {
 	MessageID           string    `json:"message_id"`
 	RequestID           string    `json:"request_id,omitempty"`
 	SessionID           string    `json:"session_id"`
+	Tool                string    `json:"tool,omitempty"` // e.g. "claude-code", "codex"; defaults to "claude-code" server-side
 	Model               string    `json:"model"`
 	Timestamp           time.Time `json:"timestamp"`
 	InputTokens         int64     `json:"input_tokens"`
@@ -19,9 +20,11 @@ type UsageRecord struct {
 	Backfill            bool      `json:"backfill,omitempty"`
 }
 
+// IngestRequest carries records from a watcher. user_id is intentionally
+// NOT here — it's resolved server-side from the API key in the
+// Authorization header. machine_id is metadata, not identity.
 type IngestRequest struct {
 	MachineID string        `json:"machine_id"`
-	UserID    string        `json:"user_id"`
 	Records   []UsageRecord `json:"records"`
 }
 

@@ -2,38 +2,30 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"tokenusage/internal/types"
 )
 
 type API struct {
-	Store     *Store
-	Pricer    *Pricer
-	AuthToken string // optional bearer token; empty disables auth
+	Store  *Store
+	Pricer *Pricer
 }
 
 func (a *API) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/ingest", a.auth(a.handleIngest))
-	mux.HandleFunc("/summary", a.auth(a.handleSummary))
+	// /ingest requires an API key (auth via api_keys table → user_id).
+	// /summary and the embedded dashboard are open within the trusted
+	// network — put nginx auth / mTLS in front for stricter access.
+	mux.HandleFunc("/ingest", a.handleIngest)
+	mux.HandleFunc("/summary", a.handleSummary)
+	mux.HandleFunc("/users", a.handleUsers)
 	mux.HandleFunc("/healthz", a.handleHealth)
-}
-
-func (a *API) auth(h http.HandlerFunc) http.HandlerFunc {
-	if a.AuthToken == "" {
-		return h
-	}
-	want := "Bearer " + a.AuthToken
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != want {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		h(w, r)
-	}
+	mux.Handle("/", webHandler())
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -46,8 +38,24 @@ func (a *API) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// 16 MiB body cap; one batch is typically <100 KiB.
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+
+	bearer := extractBearer(r.Header.Get("Authorization"))
+	if bearer == "" {
+		http.Error(w, "missing api key (Authorization: Bearer tuk_...)", http.StatusUnauthorized)
+		return
+	}
+	userID, err := a.Store.ResolveAPIKey(r.Context(), bearer)
+	if err != nil {
+		if errors.Is(err, ErrInvalidKey) {
+			http.Error(w, "invalid or revoked api key", http.StatusUnauthorized)
+			return
+		}
+		log.Printf("ingest auth error: %v", err)
+		http.Error(w, "auth error", http.StatusInternalServerError)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20) // one batch is typically <100 KiB
 	var req types.IngestRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -55,18 +63,27 @@ func (a *API) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.MachineID == "" || req.UserID == "" {
-		http.Error(w, "machine_id and user_id required", http.StatusBadRequest)
+	if req.MachineID == "" {
+		http.Error(w, "machine_id required", http.StatusBadRequest)
 		return
 	}
-	acc, dup, err := a.Store.Insert(r.Context(), req.MachineID, req.UserID, req.Records)
+
+	acc, dup, err := a.Store.Insert(r.Context(), req.MachineID, userID, req.Records)
 	if err != nil {
-		log.Printf("ingest insert error from machine=%s user=%s: %v", req.MachineID, req.UserID, err)
+		log.Printf("ingest insert error from machine=%s user=%s: %v", req.MachineID, userID, err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(types.IngestResponse{Accepted: acc, Duplicates: dup})
+}
+
+func extractBearer(h string) string {
+	const p = "Bearer "
+	if !strings.HasPrefix(h, p) {
+		return ""
+	}
+	return strings.TrimSpace(h[len(p):])
 }
 
 type summaryRow struct {
@@ -109,6 +126,37 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 			CacheRR:  row.CacheRR,
 			Messages: row.Messages,
 			Cost:     a.Pricer.Cost(row.Model, row.Input, row.Output, row.CacheCC, row.CacheRR),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+type userView struct {
+	UserID    string `json:"user_id"`
+	Email     string `json:"email,omitempty"`
+	CreatedAt string `json:"created_at"`
+	Disabled  bool   `json:"disabled,omitempty"`
+}
+
+func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	users, err := a.Store.ListUsers(r.Context())
+	if err != nil {
+		log.Printf("users list error: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]userView, 0, len(users))
+	for _, u := range users {
+		out = append(out, userView{
+			UserID:    u.UserID,
+			Email:     u.Email,
+			CreatedAt: u.CreatedAt.UTC().Format(time.RFC3339),
+			Disabled:  u.Disabled,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -14,10 +14,18 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch: `token-usage-server admin <cmd> …`
+	if len(os.Args) >= 2 && os.Args[1] == "admin" {
+		runAdmin(os.Args[2:])
+		return
+	}
+	runServer()
+}
+
+func runServer() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dsn := flag.String("dsn", os.Getenv("TOKENUSAGE_DSN"), "PostgreSQL DSN, e.g. postgres://user:pass@host:5432/tokenusage?sslmode=disable")
 	pricePath := flag.String("pricing", os.Getenv("TOKENUSAGE_PRICING"), "optional pricing override JSON")
-	authToken := flag.String("auth-token", os.Getenv("TOKENUSAGE_AUTH_TOKEN"), "optional bearer token; empty disables auth")
 	flag.Parse()
 
 	if *dsn == "" {
@@ -38,7 +46,7 @@ func main() {
 		log.Fatalf("pricer: %v", err)
 	}
 
-	api := &server.API{Store: store, Pricer: pricer, AuthToken: *authToken}
+	api := &server.API{Store: store, Pricer: pricer}
 	mux := http.NewServeMux()
 	api.Register(mux)
 

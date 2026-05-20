@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TOKEN USAGE // observatory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,700;1,9..144,500;1,9..144,700&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">◉</span>
+    <span class="brand-name">TOKEN&nbsp;USAGE</span>
+    <span class="brand-sub">// observatory</span>
+  </div>
+  <nav class="controls" aria-label="dashboard controls">
+    <div class="range-picker" role="tablist" aria-label="time range">
+      <button data-range="1"   class="rp-btn">24h</button>
+      <button data-range="7"   class="rp-btn">7d</button>
+      <button data-range="30"  class="rp-btn is-active">30d</button>
+      <button data-range="90"  class="rp-btn">90d</button>
+      <button data-range="0"   class="rp-btn">∞</button>
+    </div>
+    <label class="user-picker">
+      <span class="up-label">USER</span>
+      <select id="user-select"><option value="">all</option></select>
+    </label>
+    <div class="live-clock" id="clock"><span class="cur">▍</span>&nbsp;—&nbsp;</div>
+  </nav>
+</header>
+
+<main class="grid" id="grid">
+
+  <section class="card hero stagger" style="--idx:0">
+    <div class="card-eyebrow">
+      <span>TOTAL · USD</span>
+      <span class="dim" id="hero-range">last 30 days</span>
+    </div>
+    <div class="hero-big">
+      <span class="currency">$</span><span class="amount" id="total-cost">0<span class="cents">.00</span></span>
+    </div>
+    <div class="hero-meta">
+      <div class="meta-row"><span class="meta-k">tokens in</span><span class="meta-v" id="total-in">—</span></div>
+      <div class="meta-row"><span class="meta-k">tokens out</span><span class="meta-v" id="total-out">—</span></div>
+      <div class="meta-row"><span class="meta-k">cache write</span><span class="meta-v" id="total-cw">—</span></div>
+      <div class="meta-row"><span class="meta-k">cache read</span><span class="meta-v hot" id="total-cr">—</span></div>
+      <div class="meta-row"><span class="meta-k">messages</span><span class="meta-v" id="total-msgs">—</span></div>
+    </div>
+    <div class="hero-savings" id="hero-savings"></div>
+  </section>
+
+  <section class="card span-2 stagger" style="--idx:1">
+    <header class="card-head">
+      <h2><em class="serif-i">Daily</em> <span class="dim">// stacked by model</span></h2>
+      <ul class="legend" id="legend"></ul>
+    </header>
+    <div class="chart-wrap">
+      <svg id="bars" preserveAspectRatio="none" aria-label="daily token cost"></svg>
+      <div id="tooltip" class="tooltip" hidden></div>
+      <div class="chart-yaxis" id="yaxis"></div>
+    </div>
+  </section>
+
+  <section class="card stagger" style="--idx:2">
+    <header class="card-head">
+      <h2><em class="serif-i">Models</em></h2>
+      <span class="dim small">by spend</span>
+    </header>
+    <ol class="rank" id="model-rank"></ol>
+  </section>
+
+  <section class="card stagger" style="--idx:3">
+    <header class="card-head">
+      <h2><em class="serif-i">Users</em></h2>
+      <span class="dim small">by spend</span>
+    </header>
+    <ol class="rank" id="user-rank"></ol>
+  </section>
+
+  <section class="card span-full stagger" style="--idx:4">
+    <header class="card-head">
+      <h2><em class="serif-i">Ledger</em> <span class="dim">// day · user · model</span></h2>
+      <div class="ledger-controls">
+        <input id="ledger-filter" type="search" placeholder="filter…" autocomplete="off">
+      </div>
+    </header>
+    <div class="ledger-wrap">
+      <table class="ledger" id="ledger">
+        <thead>
+          <tr>
+            <th data-key="day">DATE</th>
+            <th data-key="user">USER</th>
+            <th data-key="model">MODEL</th>
+            <th class="num" data-key="input">IN</th>
+            <th class="num" data-key="output">OUT</th>
+            <th class="num" data-key="cw">CACHE&nbsp;W</th>
+            <th class="num" data-key="cr">CACHE&nbsp;R</th>
+            <th class="num" data-key="msgs">MSGS</th>
+            <th class="num" data-key="cost">USD</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="empty-state" class="empty" hidden>
+        <p class="empty-title"><em class="serif-i">No readings yet.</em></p>
+        <p class="dim">Point a watcher at this server:</p>
+        <pre><code># 1. mint a key on the server
+token-usage-server admin --dsn ... key-create alice
+
+# 2. point a watcher at this endpoint
+token-usage-watcher \
+  --endpoint <span id="empty-endpoint">http://host:8080/ingest</span> \
+  --api-key tuk_... --machine $(hostname)</code></pre>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footline">
+  <span class="dim">token-usage / observatory</span>
+  <span class="dim">readings via <code>/summary</code></span>
+  <span class="dim" id="lastfetch">—</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -2,42 +2,76 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"tokenusage/internal/watcher"
 )
 
+// sourceFlag accepts repeated --source TOOL=PATH flags. Today only the
+// claude-code JSONL format is parseable; new tools (codex, opencode, …)
+// just need a parser branch in internal/watcher/scanner.go.
+type sourceFlag []watcher.Source
+
+func (s *sourceFlag) String() string {
+	parts := make([]string, len(*s))
+	for i, src := range *s {
+		parts[i] = src.Tool + "=" + src.Root
+	}
+	return strings.Join(parts, ",")
+}
+
+func (s *sourceFlag) Set(v string) error {
+	i := strings.IndexByte(v, '=')
+	if i <= 0 || i == len(v)-1 {
+		return errors.New(`--source must be "tool=path", e.g. "claude-code=/root/.claude/projects"`)
+	}
+	*s = append(*s, watcher.Source{Tool: v[:i], Root: v[i+1:]})
+	return nil
+}
+
 func main() {
 	home, _ := os.UserHomeDir()
 	defaultRoot := filepath.Join(home, ".claude", "projects")
 	defaultStateDir := filepath.Join(home, ".token-usage-watcher")
 
-	root := flag.String("root", defaultRoot, "Claude Code projects root")
+	var sources sourceFlag
+	flag.Var(&sources, "source", `repeatable: tool source as "tool=path". Default: claude-code=$HOME/.claude/projects. Only Claude Code JSONL is parsed today; codex/opencode parsers will come later.`)
+
+	// Single-source convenience flags (used if --source isn't given).
+	root := flag.String("root", defaultRoot, "(single-source mode) Claude Code JSONL root")
+	tool := flag.String("tool", env("TOKENUSAGE_TOOL", "claude-code"), "(single-source mode) tool tag stamped on records from --root")
+
 	endpoint := flag.String("endpoint", env("TOKENUSAGE_ENDPOINT", "http://localhost:8080/ingest"), "server ingest endpoint")
 	ckptPath := flag.String("checkpoint", filepath.Join(defaultStateDir, "checkpoint.json"), "checkpoint file path")
 	bufDir := flag.String("buffer", filepath.Join(defaultStateDir, "buffer"), "offline buffer directory (empty disables buffering)")
-	user := flag.String("user", env("TOKENUSAGE_USER", os.Getenv("USER")), "user id reported with each batch")
+	apiKey := flag.String("api-key", os.Getenv("TOKENUSAGE_API_KEY"), "API key (tuk_…) — required. Mint with: token-usage-server admin key-create <user>")
 	machine := flag.String("machine", env("TOKENUSAGE_MACHINE", ""), "machine id (default: hostname)")
 	interval := flag.Duration("interval", 5*time.Second, "scan interval")
 	batchSize := flag.Int("batch", 200, "max records per upload batch")
 	backfillCutoff := flag.Duration("backfill-cutoff", time.Hour, "records older than now-cutoff are marked backfill=true; 0 disables")
-	authToken := flag.String("auth-token", os.Getenv("TOKENUSAGE_AUTH_TOKEN"), "optional bearer token (must match server)")
 	once := flag.Bool("once", false, "scan once and exit (useful for cron / backfill)")
 	flag.Parse()
+
+	if len(sources) == 0 {
+		sources = append(sources, watcher.Source{Tool: *tool, Root: *root})
+	}
 
 	if *machine == "" {
 		h, _ := os.Hostname()
 		*machine = h
 	}
-	if *user == "" {
-		log.Fatal("--user (or $TOKENUSAGE_USER/$USER) is required")
+	if *apiKey == "" {
+		log.Fatal("--api-key (or $TOKENUSAGE_API_KEY) is required. Mint one with: token-usage-server admin key-create <user>")
 	}
 
 	ckpt, err := watcher.LoadCheckpoint(*ckptPath)
@@ -45,16 +79,19 @@ func main() {
 		log.Fatalf("checkpoint: %v", err)
 	}
 
+	// First run (no checkpoint) reads each JSONL from offset 0, so the
+	// initial scan ships the full history. Subsequent runs only read the
+	// new tail. Records older than --backfill-cutoff are tagged
+	// backfill=true so they don't spike the live charts.
 	sc := &watcher.Scanner{
-		Root:           *root,
+		Sources:        sources,
 		Checkpoint:     ckpt,
 		BackfillCutoff: *backfillCutoff,
 	}
 	up := &watcher.Uploader{
 		Endpoint:  *endpoint,
 		MachineID: *machine,
-		UserID:    *user,
-		AuthToken: *authToken,
+		APIKey:    *apiKey,
 		Client:    &http.Client{Timeout: 30 * time.Second},
 		BufferDir: *bufDir,
 	}
@@ -64,8 +101,8 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sigCh; cancel() }()
 
-	log.Printf("watcher: root=%s endpoint=%s user=%s machine=%s interval=%s",
-		*root, *endpoint, *user, *machine, *interval)
+	log.Printf("watcher: endpoint=%s machine=%s key=%s sources=[%s] interval=%s",
+		*endpoint, *machine, displayKey(*apiKey), formatSources(sources), *interval)
 
 	tick := time.NewTicker(*interval)
 	defer tick.Stop()
@@ -83,16 +120,24 @@ func main() {
 	}
 }
 
+func formatSources(sources []watcher.Source) string {
+	parts := make([]string, len(sources))
+	for i, s := range sources {
+		parts[i] = fmt.Sprintf("%s→%s", s.Tool, s.Root)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckpt *watcher.Checkpoint, batchSize int) {
-	up.Flush(ctx) // drain any prior offline buffer
+	up.Flush(ctx)
 
 	recs, pending, err := sc.Scan()
 	if err != nil {
 		log.Printf("scan: %v", err)
 	}
 	if len(recs) == 0 {
-		// No new records, but offsets may have advanced past non-assistant lines —
-		// persist them so we don't re-scan the same bytes next tick.
+		// Offsets may still advance past non-assistant lines — persist them
+		// so we don't re-scan the same bytes next tick.
 		if len(pending) > 0 {
 			for p, s := range pending {
 				ckpt.Set(p, s)
@@ -114,7 +159,6 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 		}
 	}
 	if !allDurable {
-		// Don't advance offsets — server will dedup on next attempt anyway.
 		return
 	}
 	for p, s := range pending {
@@ -125,6 +169,14 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 		return
 	}
 	log.Printf("ingested %d records across %d files", len(recs), len(pending))
+}
+
+// displayKey returns a safe-to-log prefix for an api key.
+func displayKey(k string) string {
+	if len(k) >= 12 {
+		return k[:12] + "…"
+	}
+	return "[invalid]"
 }
 
 func env(key, fallback string) string {
