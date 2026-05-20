@@ -1,4 +1,4 @@
-package watcher
+package parsers
 
 import (
 	"bufio"
@@ -17,7 +17,7 @@ import (
 // and truncation (size < prev offset → restart from 0).
 type claudeCodeParser struct{}
 
-func init() { RegisterParser("claude-code", claudeCodeParser{}) }
+func init() { register("claude-code", claudeCodeParser{}) }
 
 func (claudeCodeParser) Scan(path, tool string, prev FileState, backfillCutoff time.Duration, now time.Time) ([]types.UsageRecord, FileState, error) {
 	info, err := os.Stat(path)

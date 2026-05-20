@@ -7,10 +7,9 @@ import (
 	"sync"
 )
 
-type FileState struct {
-	Inode  uint64 `json:"inode"`
-	Offset int64  `json:"offset"`
-}
+// FileState comes from the parsers subpackage via the type alias in
+// scanner.go (FileState = parsers.FileState), so checkpoint serialization
+// stays JSON-compatible with the previous on-disk format.
 
 // Checkpoint is a thread-safe map of file paths to scan progress, persisted
 // atomically to a JSON file. The watcher loads it at startup and writes it

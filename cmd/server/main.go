@@ -40,15 +40,20 @@ func newRootCmd() *cobra.Command {
 		Long: "Default: runs the HTTP server.\n" +
 			"Subcommand `admin` manages users and API keys (see `admin --help`).",
 		SilenceUsage: true,
-		RunE: func(c *cobra.Command, _ []string) error {
+		// PersistentPreRunE runs before every subcommand's RunE (including
+		// root's own). One central spot to require --dsn for the whole CLI.
+		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
 			if dsn == "" {
 				return errors.New("--dsn (or $TOKENUSAGE_DSN) is required")
 			}
+			return nil
+		},
+		RunE: func(c *cobra.Command, _ []string) error {
 			return runServer(addr, pricePath, rebuildToday, rebuildDeepHour, rebuildDeepDays)
 		},
 	}
 	root.PersistentFlags().StringVar(&dsn, "dsn", os.Getenv("TOKENUSAGE_DSN"),
-		"PostgreSQL DSN (env: TOKENUSAGE_DSN)")
+		"PostgreSQL DSN (env: TOKENUSAGE_DSN) — required")
 	root.Flags().StringVar(&addr, "addr", ":8080", "listen address")
 	root.Flags().StringVar(&pricePath, "pricing", os.Getenv("TOKENUSAGE_PRICING"),
 		"optional pricing override JSON")

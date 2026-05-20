@@ -1,6 +1,6 @@
 //go:build unix
 
-package watcher
+package parsers
 
 import (
 	"os"

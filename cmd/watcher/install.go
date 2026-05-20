@@ -3,104 +3,72 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 
+	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
 )
 
-// install / uninstall / status — wire the watcher into a process supervisor.
+// install / uninstall / status — wire the watcher into a native service.
 //
 // Backends:
-//   user        systemd user service           ($HOME/.config/systemd/user/)
-//   system      systemd system service         (/etc/systemd/system/)        — needs root
-//   supervisor  supervisord program            (/etc/supervisor/conf.d/)     — needs root
 //
-// install copies the running binary into place (no separate download), writes
-// a 0600 env file with TOKENUSAGE_API_KEY / TOKENUSAGE_ENDPOINT, drops the
-// service unit, and asks the supervisor to pick it up.
+//	user        per-user service        (Linux systemd-user / macOS launchd-user)
+//	system      machine-wide service    (Linux systemd / macOS launchd-daemon / Windows SCM)
+//	supervisor  supervisord program     (Linux only; useful in containers)
+//
+// kardianos/service handles systemd / launchd / Windows; supervisord goes
+// through our own writer because no cross-platform lib covers it.
 
 const (
-	serviceName = "token-usage-watcher"
+	serviceName        = "token-usage-watcher"
+	serviceDisplayName = "Token usage watcher"
+	serviceDescription = "Tail Claude Code / Codex transcripts and ship token usage."
+	envEnvVar          = "TOKENUSAGE_ENV_FILE" // where to find env at runtime
 )
 
-type installPaths struct {
-	binDir       string
-	binPath      string
-	envDir       string
-	envPath      string
-	unitDir      string
-	unitPath     string
-	supConfDir   string
-	supConfPath  string
-	needsSudo    bool
-	wantedBy     string // systemd target
-}
+type runner struct{} // service.Interface stub — never runs in-process
 
-func pathsFor(backend, home string) installPaths {
-	p := installPaths{}
-	switch backend {
-	case "user":
-		p.binDir = filepath.Join(home, ".local", "bin")
-		p.envDir = filepath.Join(home, ".config", "token-usage-watcher")
-		p.unitDir = filepath.Join(home, ".config", "systemd", "user")
-		p.wantedBy = "default.target"
-	default: // system | supervisor
-		p.binDir = "/usr/local/bin"
-		p.envDir = "/etc/token-usage-watcher"
-		p.unitDir = "/etc/systemd/system"
-		p.supConfDir = "/etc/supervisor/conf.d"
-		if _, err := os.Stat("/etc/supervisord.d"); err == nil && backend == "supervisor" {
-			p.supConfDir = "/etc/supervisord.d"
-		}
-		p.needsSudo = os.Geteuid() != 0
-		p.wantedBy = "multi-user.target"
-	}
-	p.binPath = filepath.Join(p.binDir, serviceName)
-	p.envPath = filepath.Join(p.envDir, "env")
-	p.unitPath = filepath.Join(p.unitDir, serviceName+".service")
-	p.supConfPath = filepath.Join(p.supConfDir, serviceName+".conf")
-	return p
-}
+func (runner) Start(service.Service) error { return nil }
+func (runner) Stop(service.Service) error  { return nil }
 
 // ----- install -------------------------------------------------------------
-func newInstallCmd(home, _ string) *cobra.Command {
+func newInstallCmd(_, _ string) *cobra.Command {
 	var (
 		backend  string
 		apiKey   string
 		endpoint string
-		extra    string
+		extra    []string
 	)
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install the watcher as a service",
-		Long: "Copies the running binary into place, writes an env file and a service\n" +
-			"unit, and tells the supervisor to start it. Pick a backend:\n" +
-			"  --backend user       systemd user service (default; no root)\n" +
-			"  --backend system     systemd system service (needs root)\n" +
-			"  --backend supervisor supervisord program (containers; needs root)",
+		Long: "Pick a backend:\n" +
+			"  --backend user        per-user service (systemd-user / launchd-user)\n" +
+			"  --backend system      machine-wide service (needs root / admin)\n" +
+			"  --backend supervisor  supervisord program (Linux containers; needs root)\n" +
+			"\n" +
+			"The binary self-copies into place (no separate download) and a 0600 env\n" +
+			"file holds the API key.",
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return doInstall(backend, apiKey, endpoint, extra, home)
+			return doInstall(backend, apiKey, endpoint, extra)
 		},
 	}
 	cmd.Flags().StringVar(&backend, "backend", "user", "user | system | supervisor")
 	cmd.Flags().StringVar(&apiKey, "api-key", os.Getenv("TOKENUSAGE_API_KEY"),
 		"API key (tuk_…) — required")
-	cmd.Flags().StringVar(&endpoint, "endpoint",
-		os.Getenv("TOKENUSAGE_ENDPOINT"),
+	cmd.Flags().StringVar(&endpoint, "endpoint", os.Getenv("TOKENUSAGE_ENDPOINT"),
 		"server ingest endpoint — required (e.g. http://server:8080/ingest)")
-	cmd.Flags().StringVar(&extra, "extra-args", "",
-		"extra flags appended to ExecStart / command (quoted)")
+	cmd.Flags().StringSliceVar(&extra, "extra-args", nil,
+		"extra args appended to the service ExecStart, repeatable")
 	return cmd
 }
 
-func doInstall(backend, apiKey, endpoint, extra, home string) error {
-	if err := validateBackend(backend); err != nil {
-		return err
-	}
+func doInstall(backend, apiKey, endpoint string, extra []string) error {
 	if apiKey == "" {
 		return errors.New("--api-key (or $TOKENUSAGE_API_KEY) is required")
 	}
@@ -112,157 +80,122 @@ func doInstall(backend, apiKey, endpoint, extra, home string) error {
 	if err != nil {
 		return fmt.Errorf("locate self: %w", err)
 	}
-	p := pathsFor(backend, home)
-	if p.needsSudo {
-		return fmt.Errorf("backend %q needs root; re-run with sudo", backend)
-	}
 
-	// 1. binary
-	fmt.Printf("→ installing binary to %s\n", p.binPath)
-	if err := mkdirAll(p.binDir, 0o755); err != nil {
-		return err
-	}
-	if err := copyFile(self, p.binPath, 0o755); err != nil {
-		return fmt.Errorf("copy binary: %w", err)
-	}
-
-	// 2. env file
-	fmt.Printf("→ writing env file %s (mode 0600)\n", p.envPath)
-	if err := mkdirAll(p.envDir, 0o700); err != nil {
-		return err
-	}
-	envContent := "# Managed by `token-usage-watcher install`. Restart the service after edits.\n" +
-		"TOKENUSAGE_API_KEY=" + apiKey + "\n" +
-		"TOKENUSAGE_ENDPOINT=" + endpoint + "\n"
-	if err := os.WriteFile(p.envPath, []byte(envContent), 0o600); err != nil {
-		return err
-	}
-
-	// 3. service unit / supervisor conf
-	execLine := p.binPath
-	if extra != "" {
-		execLine = p.binPath + " " + extra
-	}
 	if backend == "supervisor" {
-		fmt.Printf("→ writing supervisord program %s\n", p.supConfPath)
-		if err := mkdirAll(p.supConfDir, 0o755); err != nil {
-			return err
-		}
-		conf := "[program:" + serviceName + "]\n" +
-			"command=/bin/bash -c 'set -a; . " + p.envPath + "; set +a; exec " + execLine + "'\n" +
-			"autostart=true\n" +
-			"autorestart=true\n" +
-			"startsecs=1\n" +
-			"startretries=10\n" +
-			"stopsignal=TERM\n" +
-			"stopwaitsecs=10\n" +
-			"user=root\n" +
-			"stdout_logfile=/var/log/" + serviceName + ".out.log\n" +
-			"stderr_logfile=/var/log/" + serviceName + ".err.log\n" +
-			"stdout_logfile_maxbytes=10MB\n" +
-			"stderr_logfile_maxbytes=10MB\n" +
-			"stdout_logfile_backups=3\n" +
-			"stderr_logfile_backups=3\n"
-		if err := os.WriteFile(p.supConfPath, []byte(conf), 0o644); err != nil {
-			return err
-		}
-		fmt.Println("→ supervisorctl reread && update")
-		if err := runCmd("supervisorctl", "reread"); err != nil {
-			return err
-		}
-		if err := runCmd("supervisorctl", "update"); err != nil {
-			return err
-		}
-		return showStatus(backend)
+		return installSupervisor(self, apiKey, endpoint, extra)
 	}
 
-	// systemd path (user or system)
-	fmt.Printf("→ writing systemd unit %s\n", p.unitPath)
-	if err := mkdirAll(p.unitDir, 0o755); err != nil {
+	cfg, err := serviceConfig(backend, self, apiKey, endpoint, extra)
+	if err != nil {
 		return err
 	}
-	unit := "[Unit]\n" +
-		"Description=Token usage watcher (Claude Code / Codex)\n" +
-		"After=network-online.target\n" +
-		"Wants=network-online.target\n" +
-		"\n" +
-		"[Service]\n" +
-		"Type=simple\n" +
-		"EnvironmentFile=" + p.envPath + "\n" +
-		"ExecStart=" + execLine + "\n" +
-		"Restart=on-failure\n" +
-		"RestartSec=10s\n" +
-		"NoNewPrivileges=true\n" +
-		"ProtectSystem=full\n" +
-		"PrivateTmp=true\n" +
-		"\n" +
-		"[Install]\n" +
-		"WantedBy=" + p.wantedBy + "\n"
-	if err := os.WriteFile(p.unitPath, []byte(unit), 0o644); err != nil {
-		return err
+	s, err := service.New(runner{}, cfg)
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	// Uninstall first to make install idempotent: re-running with new
+	// flags doesn't leave a stale unit behind.
+	_ = s.Uninstall()
+	if err := s.Install(); err != nil {
+		return fmt.Errorf("install: %w", err)
+	}
+	if err := s.Start(); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	st, _ := s.Status()
+	fmt.Printf("→ installed and started %s (backend=%s, status=%s)\n",
+		serviceName, backend, statusName(st))
+	return nil
+}
+
+// serviceConfig builds a kardianos service.Config. We pass the api-key /
+// endpoint via Environment (kardianos translates to systemd Environment=,
+// launchd EnvironmentVariables, Windows registry env) so the secrets
+// never appear on the command line.
+func serviceConfig(backend, self, apiKey, endpoint string, extra []string) (*service.Config, error) {
+	args := []string{"run"}
+	args = append(args, extra...)
+
+	cfg := &service.Config{
+		Name:        serviceName,
+		DisplayName: serviceDisplayName,
+		Description: serviceDescription,
+		Executable:  self,
+		Arguments:   args,
+		EnvVars: map[string]string{
+			"TOKENUSAGE_API_KEY":  apiKey,
+			"TOKENUSAGE_ENDPOINT": endpoint,
+		},
+		Option: service.KeyValue{
+			// Restart on crash, with a small back-off.
+			"Restart":          "on-failure",
+			"RestartSec":       10,
+			// systemd-only: log to journal.
+			"LogOutput":        true,
+		},
 	}
 
-	systemctl := []string{"systemctl"}
-	if backend == "user" {
-		systemctl = append(systemctl, "--user")
+	switch backend {
+	case "user":
+		// kardianos uses UserService=true for systemd-user / launchd-user.
+		// On Windows there is no concept of "user service" in SCM, so user
+		// mode just isn't supported there; bail with a clear message.
+		if runtime.GOOS == "windows" {
+			return nil, errors.New("user backend isn't supported on Windows; use --backend system (needs admin)")
+		}
+		cfg.Option["UserService"] = true
+	case "system":
+		// default — machine-wide service. Needs root/admin to install.
+	default:
+		return nil, fmt.Errorf("invalid backend %q (use user | system | supervisor)", backend)
 	}
-	fmt.Println("→ systemctl daemon-reload && enable --now")
-	if err := runCmd(systemctl[0], append(systemctl[1:], "daemon-reload")...); err != nil {
-		return err
+	return cfg, nil
+}
+
+func statusName(s service.Status) string {
+	switch s {
+	case service.StatusRunning:
+		return "running"
+	case service.StatusStopped:
+		return "stopped"
+	default:
+		return "unknown"
 	}
-	if err := runCmd(systemctl[0], append(systemctl[1:], "enable", "--now", serviceName+".service")...); err != nil {
-		return err
-	}
-	return showStatus(backend)
 }
 
 // ----- uninstall -----------------------------------------------------------
-func newUninstallCmd(home string) *cobra.Command {
+func newUninstallCmd(_ string) *cobra.Command {
 	var backend string
 	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Stop and remove the installed service",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return doUninstall(backend, home)
+			return doUninstall(backend)
 		},
 	}
 	cmd.Flags().StringVar(&backend, "backend", "user", "user | system | supervisor")
 	return cmd
 }
 
-func doUninstall(backend, home string) error {
-	if err := validateBackend(backend); err != nil {
+func doUninstall(backend string) error {
+	if backend == "supervisor" {
+		return uninstallSupervisor()
+	}
+	self, _ := os.Executable()
+	cfg, err := serviceConfig(backend, self, "x", "x", nil) // env values irrelevant
+	if err != nil {
 		return err
 	}
-	p := pathsFor(backend, home)
-	if p.needsSudo {
-		return fmt.Errorf("backend %q needs root; re-run with sudo", backend)
+	s, err := service.New(runner{}, cfg)
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
 	}
-
-	fmt.Printf("→ stopping %s (backend=%s)\n", serviceName, backend)
-	switch backend {
-	case "user":
-		_ = runQuiet("systemctl", "--user", "stop", serviceName+".service")
-		_ = runQuiet("systemctl", "--user", "disable", serviceName+".service")
-		_ = runQuiet("systemctl", "--user", "daemon-reload")
-	case "system":
-		_ = runQuiet("systemctl", "stop", serviceName+".service")
-		_ = runQuiet("systemctl", "disable", serviceName+".service")
-		_ = runQuiet("systemctl", "daemon-reload")
-	case "supervisor":
-		_ = runQuiet("supervisorctl", "stop", serviceName)
-		_ = runQuiet("supervisorctl", "remove", serviceName)
-		_ = os.Remove(p.supConfPath)
-		_ = runQuiet("supervisorctl", "reread")
-		_ = runQuiet("supervisorctl", "update")
+	_ = s.Stop()
+	if err := s.Uninstall(); err != nil {
+		return fmt.Errorf("uninstall: %w", err)
 	}
-	if backend == "user" || backend == "system" {
-		_ = os.Remove(p.unitPath)
-	}
-	_ = os.Remove(p.binPath)
-	_ = os.RemoveAll(p.envDir)
-	fmt.Println("→ uninstalled. (Checkpoint at $HOME/.token-usage-watcher/ left untouched.)")
+	fmt.Printf("→ uninstalled %s (backend=%s)\n", serviceName, backend)
 	return nil
 }
 
@@ -274,48 +207,151 @@ func newStatusCmd(_ string) *cobra.Command {
 		Short: "Show service status",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return showStatus(backend)
+			return doStatus(backend)
 		},
 	}
 	cmd.Flags().StringVar(&backend, "backend", "auto",
-		"user | system | supervisor | auto (try all three and report)")
+		"user | system | supervisor | auto")
 	return cmd
 }
 
-func showStatus(backend string) error {
+func doStatus(backend string) error {
 	if backend == "auto" {
-		// Try all three; print whatever responds.
-		printHeader := func(name string) { fmt.Println("─── " + name + " ───") }
-		printHeader("systemd --user")
-		_ = runRelay("systemctl", "--user", "status", serviceName+".service", "--no-pager", "--lines=10")
-		fmt.Println()
-		printHeader("systemd (system)")
-		_ = runRelay("systemctl", "status", serviceName+".service", "--no-pager", "--lines=10")
-		fmt.Println()
-		printHeader("supervisord")
-		_ = runRelay("supervisorctl", "status", serviceName)
+		// Try each backend that's plausible on this OS, report whatever
+		// responds. supervisord only on Linux.
+		for _, b := range []string{"user", "system", "supervisor"} {
+			if b == "supervisor" && runtime.GOOS != "linux" {
+				continue
+			}
+			fmt.Printf("─── backend=%s ───\n", b)
+			_ = doStatus(b)
+			fmt.Println()
+		}
 		return nil
 	}
-	switch backend {
-	case "user":
-		return runRelay("systemctl", "--user", "status", serviceName+".service", "--no-pager", "--lines=20")
-	case "system":
-		return runRelay("systemctl", "status", serviceName+".service", "--no-pager", "--lines=20")
-	case "supervisor":
-		return runRelay("supervisorctl", "status", serviceName)
+	if backend == "supervisor" {
+		return statusSupervisor()
 	}
-	return validateBackend(backend)
+	self, _ := os.Executable()
+	cfg, err := serviceConfig(backend, self, "x", "x", nil)
+	if err != nil {
+		return err
+	}
+	s, err := service.New(runner{}, cfg)
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	st, err := s.Status()
+	if err != nil {
+		fmt.Printf("  %s: %v\n", serviceName, err)
+		return nil
+	}
+	fmt.Printf("  %s: %s\n", serviceName, statusName(st))
+	return nil
+}
+
+// ----- supervisor (Linux only, manual config write) ------------------------
+func installSupervisor(self, apiKey, endpoint string, extra []string) error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("--backend supervisor is Linux-only (current: %s)", runtime.GOOS)
+	}
+	if os.Geteuid() != 0 {
+		return errors.New("--backend supervisor needs root; re-run with sudo")
+	}
+	if _, err := exec.LookPath("supervisorctl"); err != nil {
+		return errors.New("supervisorctl not found in $PATH (apt-get install supervisor)")
+	}
+
+	confDir := "/etc/supervisor/conf.d"
+	if _, err := os.Stat("/etc/supervisord.d"); err == nil {
+		confDir = "/etc/supervisord.d"
+	}
+	binDir := "/usr/local/bin"
+	envDir := "/etc/token-usage-watcher"
+	binPath := filepath.Join(binDir, serviceName)
+	envPath := filepath.Join(envDir, "env")
+	confPath := filepath.Join(confDir, serviceName+".conf")
+
+	// 1. copy self to /usr/local/bin
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+	if err := copySelf(self, binPath); err != nil {
+		return fmt.Errorf("copy binary: %w", err)
+	}
+
+	// 2. env file (0600)
+	if err := os.MkdirAll(envDir, 0o700); err != nil {
+		return err
+	}
+	envContent := "TOKENUSAGE_API_KEY=" + apiKey + "\nTOKENUSAGE_ENDPOINT=" + endpoint + "\n"
+	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
+		return err
+	}
+
+	// 3. supervisord program file
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		return err
+	}
+	execLine := binPath + " run"
+	for _, a := range extra {
+		execLine += " " + a
+	}
+	conf := "[program:" + serviceName + "]\n" +
+		"command=/bin/bash -c 'set -a; . " + envPath + "; set +a; exec " + execLine + "'\n" +
+		"autostart=true\nautorestart=true\nstartsecs=1\nstartretries=10\n" +
+		"stopsignal=TERM\nstopwaitsecs=10\nuser=root\n" +
+		"stdout_logfile=/var/log/" + serviceName + ".out.log\n" +
+		"stderr_logfile=/var/log/" + serviceName + ".err.log\n" +
+		"stdout_logfile_maxbytes=10MB\nstderr_logfile_maxbytes=10MB\n" +
+		"stdout_logfile_backups=3\nstderr_logfile_backups=3\n"
+	if err := os.WriteFile(confPath, []byte(conf), 0o644); err != nil {
+		return err
+	}
+
+	// 4. reload + start
+	if err := runCmd("supervisorctl", "reread"); err != nil {
+		return err
+	}
+	if err := runCmd("supervisorctl", "update"); err != nil {
+		return err
+	}
+	fmt.Printf("→ installed supervisor program %s\n", confPath)
+	return statusSupervisor()
+}
+
+func uninstallSupervisor() error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("--backend supervisor is Linux-only")
+	}
+	confDir := "/etc/supervisor/conf.d"
+	if _, err := os.Stat("/etc/supervisord.d"); err == nil {
+		confDir = "/etc/supervisord.d"
+	}
+	confPath := filepath.Join(confDir, serviceName+".conf")
+	_ = exec.Command("supervisorctl", "stop", serviceName).Run()
+	_ = exec.Command("supervisorctl", "remove", serviceName).Run()
+	_ = os.Remove(confPath)
+	_ = exec.Command("supervisorctl", "reread").Run()
+	_ = exec.Command("supervisorctl", "update").Run()
+	_ = os.Remove("/usr/local/bin/" + serviceName)
+	_ = os.RemoveAll("/etc/token-usage-watcher")
+	fmt.Printf("→ uninstalled supervisor program %s\n", confPath)
+	return nil
+}
+
+func statusSupervisor() error {
+	if runtime.GOOS != "linux" {
+		fmt.Printf("  %s: (supervisor not available on %s)\n", serviceName, runtime.GOOS)
+		return nil
+	}
+	out, err := exec.Command("supervisorctl", "status", serviceName).CombinedOutput()
+	fmt.Printf("  %s", string(out))
+	_ = err
+	return nil
 }
 
 // ----- helpers -------------------------------------------------------------
-func validateBackend(b string) error {
-	switch b {
-	case "user", "system", "supervisor":
-		return nil
-	}
-	return fmt.Errorf("invalid backend %q (want: user | system | supervisor)", b)
-}
-
 func runCmd(name string, args ...string) error {
 	c := exec.Command(name, args...)
 	c.Stdout = os.Stdout
@@ -323,51 +359,14 @@ func runCmd(name string, args ...string) error {
 	return c.Run()
 }
 
-// runRelay is like runCmd but does NOT propagate exit code as a Go error —
-// status output (even of an exited service) is the user's signal.
-func runRelay(name string, args ...string) error {
-	c := exec.Command(name, args...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	_ = c.Run()
-	return nil
-}
-
-func runQuiet(name string, args ...string) error {
-	return exec.Command(name, args...).Run()
-}
-
-func mkdirAll(p string, mode os.FileMode) error {
-	if err := os.MkdirAll(p, mode); err != nil {
-		return fmt.Errorf("mkdir %s: %w", p, err)
-	}
-	return nil
-}
-
-func copyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
+func copySelf(src, dst string) error {
+	in, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	// Use a temp file in the same dir + rename so an interrupted copy
-	// doesn't leave a half-written binary at dst.
-	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*")
-	if err != nil {
+	tmp := dst + ".new"
+	if err := os.WriteFile(tmp, in, 0o755); err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, in); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), dst)
+	return os.Rename(tmp, dst)
 }
-

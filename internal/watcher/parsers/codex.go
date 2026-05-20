@@ -1,4 +1,4 @@
-package watcher
+package parsers
 
 import (
 	"bufio"
@@ -13,12 +13,22 @@ import (
 	"tokenusage/internal/types"
 )
 
-// codexParser handles OpenAI codex CLI rollout sessions. Sessions are
-// small single-author files; we treat them as immutable-once-finalized
-// and re-parse on size/inode change rather than tailing by offset.
+// codexParser handles OpenAI codex CLI rollout sessions. Sessions live at
+//   ~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<uuid>.jsonl
+//
+// Each line is {timestamp, type, payload}. Token usage lives in
+//   event_msg.payload.type == "token_count"
+// where payload.info.total_token_usage is the *cumulative* running total
+// for the session. payload.info.last_token_usage exists too but Codex
+// emits it duplicated across consecutive events, so summing it double-
+// counts. We compute per-event deltas off total_token_usage instead.
+//
+// Session files are small (~100 KB) and may grow as the session continues.
+// We re-parse the whole file whenever size/inode change; the server's PK
+// dedups records on every re-send.
 type codexParser struct{}
 
-func init() { RegisterParser("codex", codexParser{}) }
+func init() { register("codex", codexParser{}) }
 
 func (codexParser) Scan(path, tool string, prev FileState, backfillCutoff time.Duration, now time.Time) ([]types.UsageRecord, FileState, error) {
 	info, err := os.Stat(path)
@@ -28,29 +38,11 @@ func (codexParser) Scan(path, tool string, prev FileState, backfillCutoff time.D
 	inode := inodeOf(info)
 	size := info.Size()
 	if prev.Inode == inode && prev.Offset == size {
-		return nil, FileState{Inode: inode, Offset: size}, nil
+		return nil, FileState{Inode: inode, Offset: size}, nil // unchanged
 	}
 	recs, err := parseCodexFile(path, tool, backfillCutoff, now)
 	return recs, FileState{Inode: inode, Offset: size}, err
 }
-
-// Codex (OpenAI codex CLI) writes one session per file under
-//   ~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<uuid>.jsonl
-//
-// Each line is {timestamp, type, payload}. Token usage lives in
-//   event_msg.payload.type == "token_count"
-// where payload.info.total_token_usage is the *cumulative* running total
-// for the session. payload.info.last_token_usage exists but Codex emits
-// it duplicated across consecutive events, so summing it double-counts.
-//
-// We compute per-event deltas off total_token_usage. The model name is
-// learned from turn_context events that appear before each call.
-//
-// Re-scan semantics: the file is small (single session ≤ ~1 MB) and may
-// receive new lines as the session continues. The scanner re-reads the
-// whole file whenever size/inode change; records are emitted with a
-// stable synthetic message_id (cdx_<session>_<event-timestamp>) so the
-// server's PK dedups them on every re-send.
 
 type codexLine struct {
 	Timestamp string          `json:"timestamp"`
@@ -74,16 +66,12 @@ type codexTokenCount struct {
 }
 
 type codexTokens struct {
-	InputTokens          int64 `json:"input_tokens"`
-	CachedInputTokens    int64 `json:"cached_input_tokens"`
-	OutputTokens         int64 `json:"output_tokens"`
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
 	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 }
 
-// parseCodexFile reads a whole Codex rollout JSONL and returns one
-// UsageRecord per actual API call (i.e. per non-zero delta of
-// total_token_usage). Caller decides what to do with the result —
-// the server dedups by (message_id, request_id) regardless.
 func parseCodexFile(path, tool string, backfillCutoff time.Duration, now time.Time) ([]types.UsageRecord, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -95,7 +83,7 @@ func parseCodexFile(path, tool string, backfillCutoff time.Duration, now time.Ti
 	sessionID := sessionIDFromFilename(filepath.Base(path))
 	model := ""
 	project := projectFromPath(path)
-	var prev codexTokens // zero-value start: first event's delta = its totals
+	var prev codexTokens
 	var out []types.UsageRecord
 
 	for {
@@ -128,7 +116,6 @@ func emitCodexLine(
 	}
 	switch l.Type {
 	case "session_meta":
-		// Use the meta id only if we couldn't derive one from the filename.
 		if *sessionID == "" {
 			var meta codexSessionMeta
 			if json.Unmarshal(l.Payload, &meta) == nil {
@@ -149,16 +136,13 @@ func emitCodexLine(
 			return
 		}
 		t := tc.Info.TotalTokenUsage
-		// Delta over prev. If all zero, this event is a duplicate-emission
-		// of the previous turn's totals — skip it.
 		dIn := t.InputTokens - prev.InputTokens
 		dOut := t.OutputTokens - prev.OutputTokens
 		dCache := t.CachedInputTokens - prev.CachedInputTokens
 		dReason := t.ReasoningOutputTokens - prev.ReasoningOutputTokens
 		if dIn <= 0 && dOut <= 0 && dCache <= 0 && dReason <= 0 {
-			return
+			return // dup emission of the previous turn's totals
 		}
-		// Guard against negative deltas (shouldn't happen but be defensive).
 		if dIn < 0 {
 			dIn = 0
 		}
@@ -186,8 +170,8 @@ func emitCodexLine(
 			Model:               *model,
 			Timestamp:           ts,
 			InputTokens:         dIn,
-			OutputTokens:        dOut + dReason, // count reasoning as output for cost
-			CacheCreationTokens: 0,              // codex has no prompt-cache write phase
+			OutputTokens:        dOut + dReason, // reasoning is billable output
+			CacheCreationTokens: 0,              // codex has no separate cache write
 			CacheReadTokens:     dCache,
 			ProjectPath:         project,
 			Backfill:            backfill,
@@ -203,6 +187,5 @@ func sessionIDFromFilename(name string) string {
 	if len(parts) < 5 {
 		return base
 	}
-	// UUID is the last 5 hyphen-separated groups.
 	return strings.Join(parts[len(parts)-5:], "-")
 }

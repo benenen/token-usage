@@ -8,12 +8,18 @@ import (
 	"time"
 
 	"tokenusage/internal/types"
+	"tokenusage/internal/watcher/parsers"
 )
 
+// FileState is re-exported so callers (Checkpoint persistence, the
+// watcher main loop) can treat scanner state uniformly without importing
+// the parsers subpackage directly.
+type FileState = parsers.FileState
+
 // Source binds a JSONL root directory to a tool name. The tool name
-// drives parser selection (see parser.go); the root is the directory
-// the watcher walks for *.jsonl files. One watcher process can fan
-// over multiple sources, each handled by its own Parser implementation.
+// drives parser selection (see internal/watcher/parsers); the root is
+// the directory the watcher walks for *.jsonl. One watcher process can
+// fan over multiple sources, each handled by its own Parser.
 type Source struct {
 	Tool string
 	Root string
@@ -22,16 +28,12 @@ type Source struct {
 type Scanner struct {
 	Sources        []Source
 	Checkpoint     *Checkpoint
-	BackfillCutoff time.Duration // records older than now-cutoff are marked backfill=true
+	BackfillCutoff time.Duration
 }
 
 // Scan walks every Source root for *.jsonl in parallel goroutines (one
 // per source) and returns merged records + per-file FileState. The caller
 // must persist the checkpoint only AFTER successfully uploading.
-//
-// Per-source parallelism is a real win when one tree is on a slow disk
-// or holds many small files: 600 Claude Code files + 200 Codex files
-// scan side by side instead of serially.
 func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 	type result struct {
 		recs    []types.UsageRecord
@@ -46,7 +48,7 @@ func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 		wg.Add(1)
 		go func(i int, src Source) {
 			defer wg.Done()
-			parser := parserFor(src.Tool)
+			parser := parsers.For(src.Tool)
 			if parser == nil {
 				results[i].err = errUnknownParser(src.Tool)
 				return
@@ -92,15 +94,6 @@ func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 		}
 	}
 	return allRecs, allPending, firstErr
-}
-
-// projectFromPath: parent dir name (works for both
-//   ~/.claude/projects/<encoded-project>/<session>.jsonl
-//   ~/.codex/sessions/YYYY/MM/DD/rollout-...jsonl   ("DD")
-// — for Codex you typically don't care about the daily folder, but it's
-// a stable hint about session age.
-func projectFromPath(p string) string {
-	return filepath.Base(filepath.Dir(p))
 }
 
 type unknownParserErr string
