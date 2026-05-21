@@ -384,11 +384,17 @@ body::before {
   left: 0; top: 16px; bottom: 26px;
   width: 100%;
   pointer-events: none;
-  display: flex; flex-direction: column-reverse;
-  justify-content: space-between;
 }
 .chart-yaxis .gridline {
-  position: relative;
+  /* Each gridline is placed by its inline `bottom: N%` style — N=0
+     anchors to the bottom of chart-yaxis, N=100 anchors to the top.
+     `position: absolute` is what makes that percentage actually mean
+     "from container bottom" (with `position: relative` it incorrectly
+     meant "shift element up by N% of container height", which pushed
+     the top gridline 234px above chart-yaxis — the root cause of the
+     "y-axis label overlaps the header" bug). */
+  position: absolute;
+  left: 0; right: 0;
   border-top: 1px dashed var(--line-soft);
   font-size: 10px;
   color: var(--text-dim);

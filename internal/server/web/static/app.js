@@ -378,8 +378,11 @@
     const maxTotal = Math.max(...dense.map(d => metricTotal(d)), state.metric === "tokens" ? 1 : 0.01);
     const niceMax = niceCeil(maxTotal);
 
-    // y grid lines + labels
-    const steps = 4;
+    // y grid lines + labels — three ticks (0 / mid / niceMax) is enough
+    // to anchor the eye without crowding the card-head and without
+    // making the top label collide with the title text. Mid and max
+    // change with the data via niceCeil(maxTotal).
+    const steps = 2;
     for (let i = 0; i <= steps; i++) {
       const v = niceMax * (i / steps);
       const div = el("div", { class: "gridline", style: `bottom:${(i / steps * 100)}%` });
