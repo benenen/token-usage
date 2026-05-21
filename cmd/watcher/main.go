@@ -60,6 +60,7 @@ Subcommands:
   run        run the watcher (default)
   install    install as a service (systemd user / system / supervisord)
   uninstall  stop and remove the service
+  restart    restart the installed service
   status     show service status`,
 		SilenceUsage: true,
 		RunE:         runE,
@@ -77,6 +78,7 @@ Subcommands:
 		runCmd,
 		install.NewInstallCmd(),
 		install.NewUninstallCmd(),
+		install.NewRestartCmd(),
 		install.NewStatusCmd(),
 	)
 	return root

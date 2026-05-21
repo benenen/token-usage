@@ -227,6 +227,44 @@ func doUninstall(backend string) error {
 	return nil
 }
 
+// ----- restart -------------------------------------------------------------
+
+// NewRestartCmd returns the `restart` cobra subcommand.
+func NewRestartCmd() *cobra.Command {
+	var backend string
+	cmd := &cobra.Command{
+		Use:   "restart",
+		Short: "Restart the installed service",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			return doRestart(backend)
+		},
+	}
+	cmd.Flags().StringVar(&backend, "backend", "user", "user | system"+supervisorFlagHelp())
+	return cmd
+}
+
+func doRestart(backend string) error {
+	if backend == "supervisor" {
+		return restartSupervisor()
+	}
+	self, _ := os.Executable()
+	cfg, err := serviceConfig(backend, self, "x", "x", nil) // env values irrelevant for restart
+	if err != nil {
+		return err
+	}
+	s, err := service.New(runner{}, cfg)
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	if err := s.Restart(); err != nil {
+		return fmt.Errorf("restart: %w", err)
+	}
+	st, _ := s.Status()
+	fmt.Printf("→ restarted %s (backend=%s, status=%s)\n", serviceName, backend, statusName(st))
+	return nil
+}
+
 // ----- status --------------------------------------------------------------
 
 // NewStatusCmd returns the `status` cobra subcommand.

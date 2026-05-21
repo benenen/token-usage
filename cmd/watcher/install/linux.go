@@ -135,6 +135,17 @@ func statusSupervisor() error {
 	return nil
 }
 
+func restartSupervisor() error {
+	if _, err := exec.LookPath("supervisorctl"); err != nil {
+		return errors.New("supervisorctl not found in $PATH")
+	}
+	if err := runCmd("supervisorctl", "restart", serviceName); err != nil {
+		return fmt.Errorf("supervisorctl restart: %w", err)
+	}
+	fmt.Printf("→ restarted supervisor program %s\n", serviceName)
+	return statusSupervisor()
+}
+
 func pickSupervisorConfDir() string {
 	if _, err := os.Stat("/etc/supervisord.d"); err == nil {
 		return "/etc/supervisord.d"

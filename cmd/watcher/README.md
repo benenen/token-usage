@@ -127,11 +127,13 @@ token-usage-watcher.exe install --backend system --api-key … --endpoint …
 `install` is idempotent — re-running with different flags replaces the
 existing unit cleanly.
 
-#### Status / uninstall
+#### Status / restart / uninstall
 
 ```bash
 token-usage-watcher status                    # all backends on this OS
 token-usage-watcher status --backend system   # one backend
+token-usage-watcher restart                   # restart the installed service (default --backend user)
+token-usage-watcher restart --backend system  # restart the system-wide service
 token-usage-watcher uninstall                 # default --backend user; --backend system / supervisor as needed
 ```
 
