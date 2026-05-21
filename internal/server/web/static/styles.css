@@ -365,6 +365,11 @@ body::before {
 .chart-wrap {
   position: relative;
   margin-top: 4px;
+  /* Reserve room for the topmost y-axis label (its span sits 12px
+     above its gridline; without padding it spills into card-head and
+     collides with the "Daily" title — most visible in TOKENS mode
+     where labels read "500.0K" not "$5"). */
+  padding-top: 16px;
 }
 #bars {
   width: 100%;
@@ -374,7 +379,9 @@ body::before {
 }
 .chart-yaxis {
   position: absolute;
-  left: 0; top: 0; bottom: 26px;
+  /* Top edge matches #bars's natural top (chart-wrap's padding-top),
+     so the top gridline lines up with the top of the SVG. */
+  left: 0; top: 16px; bottom: 26px;
   width: 100%;
   pointer-events: none;
   display: flex; flex-direction: column-reverse;
