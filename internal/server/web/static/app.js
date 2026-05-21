@@ -145,21 +145,23 @@
     }
     const sumURL = "/summary" + (params.toString() ? "?" + params.toString() : "");
     try {
-      const [sumRes, usrRes] = await Promise.all([
-        fetch(sumURL,   { headers: { accept: "application/json" }}),
-        fetch("/users", { headers: { accept: "application/json" }}),
-      ]);
+      const sumRes = await fetch(sumURL, { headers: { accept: "application/json" }});
       if (!sumRes.ok) throw new Error("/summary HTTP " + sumRes.status);
       state.rows = (await sumRes.json()) || [];
-      // /users is newer; gracefully degrade if it's missing.
-      state.users = usrRes.ok ? ((await usrRes.json()) || []) : [];
     } catch (e) {
-      console.error("fetch failed", e);
+      console.error("/summary fetch failed", e);
       els.lastFetch.textContent = "fetch failed @ " + new Date().toLocaleTimeString();
       return;
     }
     els.lastFetch.textContent = "synced @ " + new Date().toLocaleTimeString();
     render();
+    // Fire /users in the background — it can be 20s+ during heavy /ingest
+    // (pool saturation), and the dashboard's main content doesn't need it.
+    // When it arrives, just refresh the USER dropdown.
+    fetch("/users", { headers: { accept: "application/json" }})
+      .then(r => r.ok ? r.json() : [])
+      .then(u => { state.users = u || []; renderUserOptions(); })
+      .catch(e => console.warn("/users fetch failed (non-fatal)", e));
   }
 
   // ---- input handlers -----------------------------------------------------

@@ -21,6 +21,15 @@ func NewStore(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// pgxpool defaults MaxConns to max(4, NumCPU) — too small to absorb a
+	// 67k-record backfill burst (~330 concurrent /ingest batches) while
+	// also serving the dashboard's /summary + /users on the same pool;
+	// /users would queue 10+ seconds behind the heavy /ingest CTEs.
+	// Override only when the DSN didn't set pool_max_conns itself, so
+	// operators retain explicit control via `?pool_max_conns=…`.
+	if cfg.MaxConns < 25 {
+		cfg.MaxConns = 25
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
