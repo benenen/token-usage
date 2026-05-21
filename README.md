@@ -101,15 +101,32 @@ served at `http://host:8080/`.
 
 That's it. The watcher will:
 
-1. Walk `~/.claude/projects/**/*.jsonl`.
+1. **Auto-detect** every supported tool on the box (currently `claude-code`,
+   `codex`, `opencode`) and walk each one's transcript root in parallel.
 2. On first run, ship the **whole history** (records older than 1h are tagged
    `backfill=true` so they don't spike the live curves).
-3. On every subsequent tick (default 5s), ship only the new tail; checkpoint is
-   keyed on `(inode, offset)` so file rotation and truncation are handled.
+3. On every subsequent tick (default 5s), ship only the new tail; per-file
+   checkpoint is keyed on `(inode, offset)` for tail-style sources or
+   `(inode, time_updated)` for SQLite (opencode), so rotation and truncation
+   are handled.
 4. If the server is unreachable, batches spool to disk under
    `~/.token-usage-watcher/buffer/` and replay on the next tick.
 
 The watcher's hostname auto-detects via `os.Hostname()` — no `--machine` flag needed.
+
+For service-mode install on each developer's box, the watcher self-installs:
+
+```bash
+./bin/token-usage-watcher install \
+    --endpoint http://server:8080/ingest \
+    --api-key tuk_…
+```
+
+`install` auto-picks the best backend for the OS (systemd / launchd / SCM /
+supervisord) without you having to know what's available; `uninstall`,
+`restart`, `status` do the obvious thing. See
+[`cmd/watcher/README.md`](cmd/watcher/README.md) for the full install /
+service-management guide.
 
 ### 4. View the dashboard
 
@@ -121,14 +138,15 @@ a sortable ledger, and an at-a-glance daily cost chart broken down by model.
 
 ## HTTP endpoints
 
-| Method | Path        | Auth          | Purpose                                     |
-| ------ | ----------- | ------------- | ------------------------------------------- |
-| POST   | `/ingest`   | Bearer key    | Batch usage records from a watcher.         |
-| GET    | `/summary`  | open          | Per-day per-user per-model totals + cost.   |
-| GET    | `/users`    | open          | List of registered users.                   |
-| GET    | `/healthz`  | open          | Liveness probe.                             |
-| GET    | `/`         | open          | Embedded dashboard (HTML/CSS/JS).           |
-| GET    | `/static/*` | open          | Dashboard CSS / JS.                         |
+| Method | Path        | Auth          | Purpose                                                   |
+| ------ | ----------- | ------------- | --------------------------------------------------------- |
+| POST   | `/ingest`   | Bearer key    | Batch usage records from a watcher.                       |
+| GET    | `/summary`  | open          | Per-day per-user per-model totals + cost.                 |
+| GET    | `/users`    | open          | List of registered users.                                 |
+| GET    | `/prices`   | open          | Active model prices + per-prefix history (LiteLLM-synced).|
+| GET    | `/healthz`  | open          | Liveness probe.                                           |
+| GET    | `/`         | open          | Embedded dashboard (HTML/CSS/JS).                         |
+| GET    | `/static/*` | open          | Dashboard CSS / JS.                                       |
 
 `/summary` accepts `?user=<id>&from=<RFC3339 | unix>&to=<…>`. Empty params mean no filter.
 
@@ -154,7 +172,19 @@ sha256 is stored — leaked DB dumps cannot replay against the API.
 
 ---
 
-## Watcher flags
+## Watcher
+
+Subcommands (run with `--help` for details):
+
+```
+token-usage-watcher [run]   tail transcripts and ship usage (default if no subcommand)
+                  install   self-install as a native service (auto-pick backend)
+                  uninstall stop and remove the installed service
+                  restart   restart the installed service
+                  status    show service status across every per-OS backend
+```
+
+`run`-mode flags:
 
 ```
 --api-key            tuk_… key (required). Also: $TOKENUSAGE_API_KEY
@@ -178,32 +208,66 @@ auto-detects whichever of these exist on the box. Adding a new tool is a
 new file under `internal/watcher/parsers/`; the rest of the pipeline
 (checkpoint, batching, auth, schema) is format-agnostic.
 
+For end-user-facing install / service-management docs (per-OS backend
+preference order, native-tool commands, on-disk state), see
+[`cmd/watcher/README.md`](cmd/watcher/README.md).
+
 ---
 
 ## Pricing
 
-Per-1M-token rates live in `internal/server/pricing.go` (Anthropic public list,
-keyed by model-name prefix; longest prefix wins). Override with
-`--pricing rates.json`:
+Per-1M-token rates live in the **`model_prices`** table, time-versioned
+`(model_prefix, valid_from, valid_to)` with longest-prefix-wins lookup.
+Pricing is applied **at read time** in `/summary` via a LATERAL JOIN, so
+rate changes re-price history without any backfill.
 
-```json
-{
-  "claude-opus-4":   {"input": 15, "output": 75, "cache_creation": 18.75, "cache_read": 1.50},
-  "claude-sonnet-4": {"input":  3, "output": 15, "cache_creation":  3.75, "cache_read": 0.30}
-}
-```
+How the table gets populated:
+
+1. **First start** seeds it from the hardcoded defaults in
+   `internal/server/pricing.go` (`source='default-seed'`, `valid_from=epoch`).
+   That ensures `/summary` always finds a row even before any sync runs.
+2. The server worker refreshes from
+   [LiteLLM's `model_prices_and_context_window.json`](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json)
+   every `--price-sync-every` (default `12h`; `0` disables). Each new
+   prefix's first sync inserts with `valid_from=epoch` so historical
+   usage is re-priced too; subsequent rate changes for the same prefix
+   close the previous row (`valid_to=NOW`) and insert a new one — i.e.
+   real LiteLLM updates show up as a proper history step.
+3. Manual override at server start: `--pricing rates.json`
+   (`$TOKENUSAGE_PRICING`):
+
+   ```json
+   {
+     "claude-opus-4":   {"input": 15, "output": 75, "cache_creation": 18.75, "cache_read": 1.50},
+     "claude-sonnet-4": {"input":  3, "output": 15, "cache_creation":  3.75, "cache_read": 0.30}
+   }
+   ```
+
+The dashboard's price-history modal (click a model name) renders the
+full `valid_from / valid_to` chain per prefix.
 
 Subscription users (Claude Pro / Max): the displayed USD is **API-equivalent
 cost**, not what you actually paid — useful as a relative comparison, not a bill.
 
 ---
 
-## Build
+## Build & release
 
 ```bash
 make build            # produces bin/token-usage-server and bin/token-usage-watcher
 make test             # go test ./...
 make vet              # go vet ./...
+make release          # cross-compile ./cmd/watcher for 5 platforms
+                      # → dist/token-usage-watcher_<ver>_<os>_<arch>.{tar.gz,zip}
+                      # + dist/SHA256SUMS (stamps `git describe`; override via RELEASE_VERSION=…)
 ```
 
-Pure-Go, no CGO. `pgx/v5` for PostgreSQL.
+Helper scripts under `scripts/`:
+
+- `scripts/upload-dist.sh user@host:/path` — scp every `dist/` artifact to a server.
+- `scripts/push-image.sh harbor.example.com/project [tag]` — `docker tag` +
+  `docker push` the locally-built server image into a Harbor (or any) registry.
+  `HARBOR_USER` / `HARBOR_PASSWORD` env trigger a `docker login` via `--password-stdin`.
+
+Pure-Go, no CGO. `pgx/v5` for PostgreSQL; `modernc.org/sqlite` (CGO-free) for
+the opencode parser.
