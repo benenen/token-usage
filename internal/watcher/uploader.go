@@ -23,37 +23,49 @@ type Uploader struct {
 	BufferDir string // if non-empty, failed batches are written here for later retry
 }
 
+// SendResult reports what the server actually did with the batch. On a
+// 2xx, Accepted+Duplicates sum to len(recs); on a spooled batch (server
+// unreachable, written to BufferDir), Spooled is true and the other
+// counts are zero. Callers can log per-batch dedup ratios from this.
+type SendResult struct {
+	Accepted   int
+	Duplicates int
+	Spooled    bool
+}
+
 // Send POSTs recs as one batch. If the POST fails AND BufferDir is set,
-// it durably writes the batch to disk and returns nil — callers can safely
-// advance the checkpoint. Returns an error only when nothing is durable yet.
-func (u *Uploader) Send(ctx context.Context, recs []types.UsageRecord) error {
+// it durably writes the batch to disk and returns Spooled=true, nil —
+// callers can safely advance the checkpoint. Returns an error only when
+// nothing is durable yet.
+func (u *Uploader) Send(ctx context.Context, recs []types.UsageRecord) (SendResult, error) {
 	if len(recs) == 0 {
-		return nil
+		return SendResult{}, nil
 	}
 	body, err := json.Marshal(types.IngestRequest{
 		MachineID: u.MachineID,
 		Records:   recs,
 	})
 	if err != nil {
-		return err
+		return SendResult{}, err
 	}
-	if err := u.post(ctx, body); err == nil {
-		return nil
-	} else if u.BufferDir == "" {
-		return err
-	} else {
-		// Server unreachable or 5xx — spool to disk so the checkpoint can advance.
-		if werr := u.spool(body); werr != nil {
-			return fmt.Errorf("post failed (%v) and could not buffer (%v)", err, werr)
-		}
-		return nil
+	res, err := u.post(ctx, body)
+	if err == nil {
+		return res, nil
 	}
+	if u.BufferDir == "" {
+		return SendResult{}, err
+	}
+	// Server unreachable or 5xx — spool to disk so the checkpoint can advance.
+	if werr := u.spool(body); werr != nil {
+		return SendResult{}, fmt.Errorf("post failed (%v) and could not buffer (%v)", err, werr)
+	}
+	return SendResult{Spooled: true}, nil
 }
 
-func (u *Uploader) post(ctx context.Context, body []byte) error {
+func (u *Uploader) post(ctx context.Context, body []byte) (SendResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return SendResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if u.APIKey != "" {
@@ -61,14 +73,19 @@ func (u *Uploader) post(ctx context.Context, body []byte) error {
 	}
 	resp, err := u.Client.Do(req)
 	if err != nil {
-		return err
+		return SendResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("server %d: %s", resp.StatusCode, bytes.TrimSpace(msg))
+		return SendResult{}, fmt.Errorf("server %d: %s", resp.StatusCode, bytes.TrimSpace(msg))
 	}
-	return nil
+	var ack types.IngestResponse
+	// Server may legitimately return an empty body (older builds, or a
+	// 204-style no-content path); fall through to zero-valued ack rather
+	// than treat decode failure as a transport error.
+	_ = json.NewDecoder(resp.Body).Decode(&ack)
+	return SendResult{Accepted: ack.Accepted, Duplicates: ack.Duplicates}, nil
 }
 
 func (u *Uploader) spool(body []byte) error {
@@ -104,7 +121,7 @@ func (u *Uploader) Flush(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		if err := u.post(ctx, body); err != nil {
+		if _, err := u.post(ctx, body); err != nil {
 			// Stop the loop; we'll retry next tick. Only bail on context-cancel
 			// or transport-level failure; an HTTP error means the server saw it
 			// but rejected — in that case drop the bad batch so we don't loop.

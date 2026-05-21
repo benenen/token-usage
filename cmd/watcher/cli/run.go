@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"tokenusage/internal/types"
 	"tokenusage/internal/watcher"
 )
 
@@ -183,6 +185,15 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 	if err != nil {
 		log.Printf("scan: %v", err)
 	}
+	elapsed := time.Since(scanStart).Round(time.Millisecond)
+
+	// One scan-summary line per tick, regardless of whether anything
+	// new flowed. Without this you can't tell a healthy idle watcher
+	// from a hung one. Per-tool breakdown shows both files walked AND
+	// new records — i.e. an idle claude-code source still shows up as
+	// `claude-code 0/801`, proving it's being scanned.
+	log.Printf("scan: %s in %s", formatPerToolScan(sc.Sources, pending, recs), elapsed)
+
 	if len(recs) == 0 {
 		if len(pending) > 0 {
 			for p, s := range pending {
@@ -195,24 +206,38 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 		return
 	}
 
-	batches := (len(recs) + batchSize - 1) / batchSize
-	log.Printf("scan: %d records across %d files in %s — uploading in %d batch(es)",
-		len(recs), len(pending), time.Since(scanStart).Round(time.Millisecond), batches)
+	// Per-record breakdown so you can chase down "why didn't tool X grow"
+	// at the source. Cheap (one line per assistant message) and
+	// grep-friendly: `grep "ingest:.*tool=claude-code"` etc.
+	for _, r := range recs {
+		log.Printf("  ingest: tool=%s model=%s in=%d out=%d cc=%d cr=%d msg=%s session=%s project=%s backfill=%v",
+			r.Tool, r.Model,
+			r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheReadTokens,
+			r.MessageID, r.SessionID, r.ProjectPath, r.Backfill)
+	}
 
+	batches := (len(recs) + batchSize - 1) / batchSize
 	allDurable := true
 	sendStart := time.Now()
 	for start := 0; start < len(recs); start += batchSize {
 		end := min(start+batchSize, len(recs))
-		if err := up.Send(ctx, recs[start:end]); err != nil {
+		res, err := up.Send(ctx, recs[start:end])
+		if err != nil {
 			log.Printf("send: %v", err)
 			allDurable = false
 			break
 		}
 		idx := start/batchSize + 1
-		if idx == batches || idx%10 == 0 {
-			log.Printf("  batch %d/%d sent (%d records, %s elapsed)",
-				idx, batches, end, time.Since(sendStart).Round(time.Millisecond))
+		// Always log every batch's server-side accept/dup tally — that's
+		// the only place "I sent N but only K were new on the server"
+		// surfaces. Without this, dedup on the server is invisible and
+		// looks like "I ingested 42 records but the dashboard didn't move".
+		status := fmt.Sprintf("accepted=%d duplicates=%d", res.Accepted, res.Duplicates)
+		if res.Spooled {
+			status = "spooled (server unreachable)"
 		}
+		log.Printf("  batch %d/%d sent (%d records, %s elapsed): %s",
+			idx, batches, end-start, time.Since(sendStart).Round(time.Millisecond), status)
 	}
 	if !allDurable {
 		return
@@ -225,4 +250,57 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 		return
 	}
 	log.Printf("ingested %d records across %d files", len(recs), len(pending))
+}
+
+// formatPerToolScan renders the per-tool "new/walked" summary used by
+// runOnce's per-tick log line. Files are attributed to tools by
+// longest-Source.Root prefix match on each pending path; records
+// already carry their Tool stamp from the parser.
+//
+//	scan: claude-code 0/801, codex 0/12, opencode 0/1
+//	scan: claude-code 5/801, codex 0/12, opencode 0/1
+//
+// Always emits every configured source, even ones with zero files and
+// zero records, so an idle source is visibly being scanned.
+func formatPerToolScan(sources []watcher.Source, pending map[string]watcher.FileState, recs []types.UsageRecord) string {
+	files := make(map[string]int, len(sources))
+	news := make(map[string]int, len(sources))
+	for _, src := range sources {
+		files[src.Tool] = 0
+		news[src.Tool] = 0
+	}
+	for path := range pending {
+		if tool := attributePath(sources, path); tool != "" {
+			files[tool]++
+		}
+	}
+	for _, r := range recs {
+		news[r.Tool]++
+	}
+	tools := make([]string, 0, len(files))
+	for t := range files {
+		tools = append(tools, t)
+	}
+	sort.Strings(tools)
+	parts := make([]string, 0, len(tools))
+	for _, t := range tools {
+		parts = append(parts, fmt.Sprintf("%s %d/%d", t, news[t], files[t]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// attributePath picks the Source whose Root is the longest prefix of
+// path — handles the (unlikely but possible) case where two configured
+// sources nest, e.g. `--source codex=$HOME/.codex/sessions` and
+// `--source codex-foo=$HOME/.codex/sessions/foo`.
+func attributePath(sources []watcher.Source, path string) string {
+	best := ""
+	bestLen := -1
+	for _, src := range sources {
+		if len(src.Root) > bestLen && strings.HasPrefix(path, src.Root) {
+			best = src.Tool
+			bestLen = len(src.Root)
+		}
+	}
+	return best
 }
