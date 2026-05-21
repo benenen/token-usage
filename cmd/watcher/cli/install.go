@@ -111,7 +111,12 @@ func installOne(backend, self, apiKey, endpoint string, extra []string) error {
 	if err != nil {
 		return fmt.Errorf("service: %w", err)
 	}
-	// Uninstall first so re-running with new flags doesn't leave a stale unit.
+	// Stop first so a running pre-install process doesn't keep the old
+	// binary mapped — and so the subsequent Install/Start writes a fresh
+	// unit + spawns a fresh pid (otherwise systemd's `disable` leaves
+	// the old process alive and Start would either no-op or double-up).
+	_ = s.Stop()
+	// Uninstall so Install() doesn't fail with "already installed".
 	_ = s.Uninstall()
 	if err := s.Install(); err != nil {
 		return fmt.Errorf("install: %w", err)

@@ -183,6 +183,15 @@ func InstallSupervisor(self, apiKey, endpoint string, extra []string) error {
 	if err := runStdio("supervisorctl", "update"); err != nil {
 		return err
 	}
+	// `update` only restarts the program when the conf file actually
+	// changed. On a binary-only re-install (same conf, new bytes at the
+	// same path) the supervised process keeps running the now-deleted
+	// inode of the old binary. Force a restart so the new binary
+	// actually takes effect — harmless when `update` already restarted
+	// it (you get a second graceful restart).
+	if err := runStdio("supervisorctl", "restart", Name); err != nil {
+		return fmt.Errorf("supervisorctl restart: %w", err)
+	}
 	fmt.Printf("→ installed supervisor program %s\n", confPath)
 	return StatusSupervisor()
 }
