@@ -420,12 +420,21 @@
     const [, m, d] = iso.split("-");
     return `${m}·${d}`;
   }
+  // Day-of-week label for the tooltip header. Forces UTC parsing
+  // (`...T00:00:00Z`) so it lines up with the server's UTC day-bucket
+  // — otherwise browsers near a DST boundary or in a positive-offset
+  // timezone could shift one row's label.
+  const WEEKDAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  function weekday(iso) {
+    const d = new Date(iso + "T00:00:00Z");
+    return WEEKDAYS[d.getUTCDay()];
+  }
 
   // ---- tooltip ------------------------------------------------------------
   function showTooltip(e, day) {
     const t = els.tooltip;
     clear(t);
-    t.appendChild(el("div", { class: "tt-day" }, day.day));
+    t.appendChild(el("div", { class: "tt-day" }, `${day.day} (${weekday(day.day)})`));
     const entries = Object.entries(day.byModel).sort((a, b) => b[1] - a[1]);
     for (const [m, v] of entries) {
       t.appendChild(el("div", { class: "tt-row" }, [
