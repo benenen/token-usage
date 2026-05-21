@@ -84,12 +84,14 @@
     sortKey: "day",
     sortDir: "desc",
     filter: "",
+    metric: "cost",     // "cost" (USD) | "tokens" — Daily bar chart axis
   };
 
   // ---- DOM refs -----------------------------------------------------------
   const $ = (id) => document.getElementById(id);
   const els = {
     rpButtons:    document.querySelectorAll(".rp-btn"),
+    metricButtons:document.querySelectorAll(".mt-btn"),
     userSelect:   $("user-select"),
     clock:        $("clock"),
     heroRange:    $("hero-range"),
@@ -177,6 +179,15 @@
     load();
   });
 
+  els.metricButtons.forEach(btn => btn.addEventListener("click", () => {
+    els.metricButtons.forEach(b => b.classList.remove("is-active"));
+    btn.classList.add("is-active");
+    state.metric = btn.dataset.metric; // "cost" | "tokens"
+    // Pure re-render — no /summary refetch needed, the raw rows already
+    // have all four token counters plus cost_usd.
+    render();
+  }));
+
   els.ledgerFilter.addEventListener("input", () => {
     state.filter = els.ledgerFilter.value.toLowerCase();
     renderLedger();
@@ -260,12 +271,37 @@
   function aggregateByDay(rows) {
     const m = new Map();
     for (const r of rows) {
-      if (!m.has(r.day)) m.set(r.day, { day: r.day, byModel: {}, total: 0 });
+      if (!m.has(r.day)) {
+        m.set(r.day, { day: r.day, byModel: {}, totalCost: 0, totalTokens: 0 });
+      }
       const slot = m.get(r.day);
-      slot.byModel[r.model] = (slot.byModel[r.model] || 0) + (r.cost_usd || 0);
-      slot.total += (r.cost_usd || 0);
+      const cost = r.cost_usd || 0;
+      const tokens = (r.input_tokens || 0)
+                   + (r.output_tokens || 0)
+                   + (r.cache_creation_tokens || 0)
+                   + (r.cache_read_tokens || 0);
+      if (!slot.byModel[r.model]) slot.byModel[r.model] = { cost: 0, tokens: 0 };
+      slot.byModel[r.model].cost   += cost;
+      slot.byModel[r.model].tokens += tokens;
+      slot.totalCost   += cost;
+      slot.totalTokens += tokens;
     }
     return Array.from(m.values()).sort((a, b) => a.day.localeCompare(b.day));
+  }
+  // Picks the current metric off a per-day or per-(day,model) slot.
+  // Centralised so the chart, tooltip, y-axis, and densify share one
+  // notion of "what number are we plotting today".
+  function metricTotal(day) {
+    return state.metric === "tokens" ? day.totalTokens : day.totalCost;
+  }
+  function metricSlot(modelSlot) {
+    if (!modelSlot) return 0;
+    return state.metric === "tokens" ? modelSlot.tokens : modelSlot.cost;
+  }
+  // Formatter for the y-axis tick labels and the tooltip per-row value.
+  function fmtMetric(v) {
+    if (state.metric === "tokens") return fmtTokens(v);
+    return "$" + (v >= 100 ? v.toFixed(0) : v.toFixed(2));
   }
 
   function aggregateBy(rows, key) {
@@ -305,11 +341,15 @@
 
   // ---- legend -------------------------------------------------------------
   function renderLegend(models) {
-    const total = models.reduce((s, m) => s + m.cost, 0);
-    const top = models.slice(0, 6);
+    // Pick the same metric the chart is plotting so the legend's
+    // percentages match the visual stack heights.
+    const pick = (m) => state.metric === "tokens" ? m.tokens : m.cost;
+    const sorted = [...models].sort((a, b) => pick(b) - pick(a));
+    const total = sorted.reduce((s, m) => s + pick(m), 0);
+    const top = sorted.slice(0, 6);
     clear(els.legend);
     for (const m of top) {
-      const pct = total > 0 ? (m.cost / total * 100).toFixed(0) : "0";
+      const pct = total > 0 ? (pick(m) / total * 100).toFixed(0) : "0";
       const li = el("li", null, [
         el("span", { class: "swatch", style: `background:${colorFor(m.name)}` }),
         el("span", null, shortenModel(m.name)),
@@ -317,8 +357,8 @@
       ]);
       els.legend.appendChild(li);
     }
-    if (models.length > 6) {
-      els.legend.appendChild(el("li", { class: "dim" }, `+ ${models.length - 6} more`));
+    if (sorted.length > 6) {
+      els.legend.appendChild(el("li", { class: "dim" }, `+ ${sorted.length - 6} more`));
     }
   }
 
@@ -333,7 +373,7 @@
     if (!byDay.length) return;
 
     const dense = densify(byDay, state.rangeDays);
-    const maxTotal = Math.max(...dense.map(d => d.total), 0.01);
+    const maxTotal = Math.max(...dense.map(d => metricTotal(d)), state.metric === "tokens" ? 1 : 0.01);
     const niceMax = niceCeil(maxTotal);
 
     // y grid lines + labels
@@ -341,7 +381,7 @@
     for (let i = 0; i <= steps; i++) {
       const v = niceMax * (i / steps);
       const div = el("div", { class: "gridline", style: `bottom:${(i / steps * 100)}%` });
-      div.appendChild(el("span", null, "$" + (v >= 100 ? v.toFixed(0) : v.toFixed(2))));
+      div.appendChild(el("span", null, fmtMetric(v)));
       els.yaxis.appendChild(div);
     }
 
@@ -362,7 +402,7 @@
       const x = padL + idx * (innerW / dense.length) + barGap / 2;
       let yCursor = padT + innerH;
       for (const model of orderedModels) {
-        const v = day.byModel[model] || 0;
+        const v = metricSlot(day.byModel[model]);
         if (v <= 0) continue;
         const h = (v / niceMax) * innerH;
         const rect = svg("rect", {
@@ -403,7 +443,7 @@
       const d = new Date(today);
       d.setUTCDate(today.getUTCDate() - i);
       const key = d.toISOString().slice(0, 10);
-      out.push(map.get(key) || { day: key, byModel: {}, total: 0 });
+      out.push(map.get(key) || { day: key, byModel: {}, totalCost: 0, totalTokens: 0 });
     }
     return out;
   }
@@ -435,17 +475,20 @@
     const t = els.tooltip;
     clear(t);
     t.appendChild(el("div", { class: "tt-day" }, `${day.day} (${weekday(day.day)})`));
-    const entries = Object.entries(day.byModel).sort((a, b) => b[1] - a[1]);
+    const entries = Object.entries(day.byModel)
+      .map(([m, v]) => [m, metricSlot(v)])
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1]);
     for (const [m, v] of entries) {
       t.appendChild(el("div", { class: "tt-row" }, [
         el("span", { class: "tt-sw", style: `background:${colorFor(m)}` }),
         el("span", { class: "tt-mdl" }, shortenModel(m)),
-        el("span", { class: "tt-val" }, "$" + v.toFixed(2)),
+        el("span", { class: "tt-val" }, fmtMetric(v)),
       ]));
     }
     t.appendChild(el("div", { class: "tt-total" }, [
       el("span", null, "TOTAL"),
-      el("span", null, "$" + day.total.toFixed(2)),
+      el("span", null, fmtMetric(metricTotal(day))),
     ]));
     t.hidden = false;
     moveTooltip(e);

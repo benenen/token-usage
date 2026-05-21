@@ -141,6 +141,33 @@ body::before {
   font-weight: 700;
 }
 
+/* In-card metric toggle (e.g. Daily card: USD vs tokens). Same look as
+   the top-bar range picker but sized for a card-head row. */
+.metric-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.mt-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  border-right: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  transition: color .12s ease, background .12s ease;
+  letter-spacing: 0.04em;
+}
+.mt-btn:last-child { border-right: 0; }
+.mt-btn:hover { color: var(--text); background: var(--surface); }
+.mt-btn.is-active {
+  color: var(--ink-deep);
+  background: var(--bone);
+  font-weight: 700;
+}
+
 .user-picker { display: inline-flex; align-items: center; gap: 8px; }
 .up-label { color: var(--text-dim); font-size: 11px; letter-spacing: 0.14em; }
 #user-select {
