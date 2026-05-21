@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -105,13 +106,34 @@ func (u *Uploader) spool(body []byte) error {
 }
 
 // Flush attempts to re-send everything in BufferDir. Stops on the first
-// network failure (no point hammering an offline server).
+// transport / 5xx / recoverable-4xx failure (no point hammering an
+// offline server). On every full or partial drain, logs a one-line
+// summary so operators can see backlog being chewed through — and so
+// "spooled (post failed: ...)" lines from earlier ticks visibly get
+// closed out as the server recovers.
 func (u *Uploader) Flush(ctx context.Context) {
 	if u.BufferDir == "" {
 		return
 	}
 	entries, err := os.ReadDir(u.BufferDir)
 	if err != nil {
+		return
+	}
+	var (
+		drained    int
+		dropped    int
+		totalAcc   int
+		totalDup   int
+		remaining  int
+		lastErr    error
+	)
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) == ".tmp" {
+			continue
+		}
+		remaining++
+	}
+	if remaining == 0 {
 		return
 	}
 	for _, e := range entries {
@@ -123,17 +145,36 @@ func (u *Uploader) Flush(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		if _, err := u.post(ctx, body); err != nil {
-			// Stop the loop; we'll retry next tick. Only bail on context-cancel
-			// or transport-level failure; an HTTP error means the server saw it
-			// but rejected — in that case drop the bad batch so we don't loop.
-			if isHTTPRejection(err) {
+		res, perr := u.post(ctx, body)
+		if perr != nil {
+			lastErr = perr
+			// Only bail on context-cancel or transport / recoverable-4xx /
+			// 5xx — those will fix themselves later. Permanent rejection
+			// (400/404/410/413/422) drops just this batch and continues.
+			if isHTTPRejection(perr) {
 				_ = os.Remove(p)
+				dropped++
+				remaining--
 				continue
 			}
-			return
+			break
 		}
 		_ = os.Remove(p)
+		drained++
+		totalAcc += res.Accepted
+		totalDup += res.Duplicates
+		remaining--
+	}
+	if drained > 0 || dropped > 0 {
+		msg := fmt.Sprintf("flushed %d spooled batch(es): accepted=%d duplicates=%d",
+			drained, totalAcc, totalDup)
+		if dropped > 0 {
+			msg += fmt.Sprintf(", dropped=%d (server returned a permanent 4xx)", dropped)
+		}
+		if remaining > 0 && lastErr != nil {
+			msg += fmt.Sprintf(", %d left in buffer (next-tick retry; last error: %v)", remaining, lastErr)
+		}
+		log.Print(msg)
 	}
 }
 
