@@ -106,13 +106,14 @@ printing what it tried and what it picked. `uninstall` / `restart` walk
 the same list and act on every candidate that has a unit on disk;
 `status` reports each candidate's state.
 
-| OS              | Preference order (root vs non-root)                                       |
-| --------------- | ------------------------------------------------------------------------- |
-| Linux root      | systemd-system → supervisord → systemd-user                               |
-| Linux non-root  | systemd-user                                                              |
-| macOS root      | launchd LaunchDaemon → launchd LaunchAgent                                |
-| macOS non-root  | launchd LaunchAgent                                                       |
-| Windows         | Windows SCM (requires Administrator; no per-user services on Win)         |
+| OS                                    | Preference order                                                          |
+| ------------------------------------- | ------------------------------------------------------------------------- |
+| Linux root, `supervisorctl` installed | supervisord → systemd-system → systemd-user                               |
+| Linux root, no supervisord            | systemd-system → systemd-user                                             |
+| Linux non-root                        | systemd-user                                                              |
+| macOS root                            | launchd LaunchDaemon → launchd LaunchAgent                                |
+| macOS non-root                        | launchd LaunchAgent                                                       |
+| Windows                               | Windows SCM (requires Administrator; no per-user services on Win)         |
 
 Examples:
 

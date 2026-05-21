@@ -48,8 +48,9 @@ func installLongHelp() string {
 	case "linux":
 		return base +
 			"Linux preference order:\n" +
-			"  root      systemd-system → supervisord → systemd-user\n" +
-			"  non-root  systemd-user\n"
+			"  root, supervisord installed     supervisord → systemd-system → systemd-user\n" +
+			"  root, supervisord NOT installed systemd-system → systemd-user\n" +
+			"  non-root                        systemd-user\n"
 	case "darwin":
 		return base +
 			"macOS preference order:\n" +

@@ -12,21 +12,34 @@ import (
 	"strings"
 )
 
-// SupervisorAvailable reports whether the supervisord backend is buildable
-// on this OS. Linux-only: there's no cross-platform supervisord equivalent.
-func SupervisorAvailable() bool { return true }
+// SupervisorAvailable reports whether the supervisord backend is usable
+// here — i.e. supervisorctl is on $PATH (the package is actually
+// installed on the host). When false, supervisor is dropped from
+// DefaultBackends and from the SupervisorFlagHelp string.
+func SupervisorAvailable() bool {
+	_, err := exec.LookPath("supervisorctl")
+	return err == nil
+}
 
 // DefaultBackends is the ordered preference list of backends to try on
 // the current process. The first whose PlatformPreInstall passes wins;
 // downstream commands fall back through the list.
 //
-// Linux root  -> [system, supervisor, user]    (machine-wide first)
-// Linux non-root -> [user]                     (only viable option)
+// Linux root, supervisord installed     -> [supervisor, system, user]
+// Linux root, supervisord NOT installed -> [system, user]
+// Linux non-root                        -> [user]
+//
+// When supervisord is installed it's preferred even over systemd-system
+// because hosts that bothered to install it usually intend to manage
+// long-running daemons that way (containers, multi-service VMs).
 func DefaultBackends() []string {
-	if os.Geteuid() == 0 {
-		return []string{"system", "supervisor", "user"}
+	if os.Geteuid() != 0 {
+		return []string{"user"}
 	}
-	return []string{"user"}
+	if SupervisorAvailable() {
+		return []string{"supervisor", "system", "user"}
+	}
+	return []string{"system", "user"}
 }
 
 // SupervisorInstalled reports whether a supervisord program file for
