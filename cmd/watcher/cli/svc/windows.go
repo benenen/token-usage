@@ -1,6 +1,6 @@
 //go:build windows
 
-package install
+package svc
 
 import (
 	"errors"
@@ -13,15 +13,24 @@ import (
 // Windows uses the Service Control Manager. kardianos/service writes the
 // service registration to HKLM\SYSTEM\CurrentControlSet\Services\<name>
 // and starts it via the SCM API. There is no per-user service concept in
-// Windows (user backend bails out in install.go's serviceConfig).
+// Windows (user backend bails out in service.go's serviceConfig).
 //
 // Admin is required to write to SCM, so we probe the process token up
 // front and surface a clean error instead of a cryptic SCM access-denied
 // later.
 
-func supervisorAvailable() bool { return false }
+func SupervisorAvailable() bool { return false }
 
-func platformPreInstall(backend string) error {
+// DefaultBackends on Windows is always just [system]; there's no
+// per-user service concept on Windows, and supervisord isn't available.
+// If the process isn't elevated, PlatformPreInstall surfaces a clean
+// error pointing the user at an admin shell.
+func DefaultBackends() []string { return []string{"system"} }
+
+// SupervisorInstalled is always false on Windows.
+func SupervisorInstalled() bool { return false }
+
+func PlatformPreInstall(backend string) error {
 	if backend != "system" {
 		return nil // serviceConfig already rejects --backend user on Windows
 	}
@@ -31,9 +40,9 @@ func platformPreInstall(backend string) error {
 	return nil
 }
 
-func platformInstallHint(backend string) string {
+func PlatformInstallHint(backend string) string {
 	if backend == "system" {
-		return "registered in the SCM; manage via `sc.exe query " + serviceName + "` or services.msc"
+		return "registered in the SCM; manage via `sc.exe query " + Name + "` or services.msc"
 	}
 	return ""
 }
@@ -62,16 +71,16 @@ func isElevated() bool {
 }
 
 // supervisord stubs — never available on Windows.
-func installSupervisor(_, _, _ string, _ []string) error {
+func InstallSupervisor(_, _, _ string, _ []string) error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }
-func uninstallSupervisor() error {
+func UninstallSupervisor() error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }
-func statusSupervisor() error {
-	fmt.Printf("  %s: (--backend supervisor not available on %s)\n", serviceName, runtime.GOOS)
+func StatusSupervisor() error {
+	fmt.Printf("  %s: (--backend supervisor not available on %s)\n", Name, runtime.GOOS)
 	return nil
 }
-func restartSupervisor() error {
+func RestartSupervisor() error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }

@@ -1,6 +1,6 @@
 //go:build linux
 
-package install
+package svc
 
 import (
 	"errors"
@@ -12,9 +12,30 @@ import (
 	"strings"
 )
 
-// supervisorAvailable reports whether the supervisord backend is buildable
+// SupervisorAvailable reports whether the supervisord backend is buildable
 // on this OS. Linux-only: there's no cross-platform supervisord equivalent.
-func supervisorAvailable() bool { return true }
+func SupervisorAvailable() bool { return true }
+
+// DefaultBackends is the ordered preference list of backends to try on
+// the current process. The first whose PlatformPreInstall passes wins;
+// downstream commands fall back through the list.
+//
+// Linux root  -> [system, supervisor, user]    (machine-wide first)
+// Linux non-root -> [user]                     (only viable option)
+func DefaultBackends() []string {
+	if os.Geteuid() == 0 {
+		return []string{"system", "supervisor", "user"}
+	}
+	return []string{"user"}
+}
+
+// SupervisorInstalled reports whether a supervisord program file for
+// this service exists. Used by uninstall/restart to skip backends that
+// were never installed without surfacing scary "not installed" errors.
+func SupervisorInstalled() bool {
+	_, err := os.Stat(filepath.Join(pickSupervisorConfDir(), Name+".conf"))
+	return err == nil
+}
 
 // Linux uses systemd. kardianos/service writes the unit:
 //
@@ -23,7 +44,7 @@ func supervisorAvailable() bool { return true }
 //
 // supervisord is an alternative backend handled below.
 
-func platformPreInstall(backend string) error {
+func PlatformPreInstall(backend string) error {
 	if backend == "system" && os.Geteuid() != 0 {
 		return errors.New("--backend system writes to /etc/systemd/system/, which needs root; re-run with sudo")
 	}
@@ -38,24 +59,24 @@ func platformPreInstall(backend string) error {
 	return nil
 }
 
-func platformInstallHint(backend string) string {
+func PlatformInstallHint(backend string) string {
 	home, _ := os.UserHomeDir()
 	switch backend {
 	case "user":
-		return "unit: " + home + "/.config/systemd/user/" + serviceName + ".service"
+		return "unit: " + home + "/.config/systemd/user/" + Name + ".service"
 	case "system":
-		return "unit: /etc/systemd/system/" + serviceName + ".service"
+		return "unit: /etc/systemd/system/" + Name + ".service"
 	case "supervisor":
-		return "program: " + pickSupervisorConfDir() + "/" + serviceName + ".conf"
+		return "program: " + pickSupervisorConfDir() + "/" + Name + ".conf"
 	}
 	return ""
 }
 
-// installSupervisor writes a /etc/supervisor/conf.d/<svc>.conf file plus
+// InstallSupervisor writes a /etc/supervisor/conf.d/<svc>.conf file plus
 // a 0600 env file under /etc, then runs `supervisorctl reread && update`.
 // Drops the API key in the env file (not the program config, which is
 // world-readable) so we don't leak the secret.
-func installSupervisor(self, apiKey, endpoint string, extra []string) error {
+func InstallSupervisor(self, apiKey, endpoint string, extra []string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("--backend supervisor needs root; re-run with sudo")
 	}
@@ -66,9 +87,9 @@ func installSupervisor(self, apiKey, endpoint string, extra []string) error {
 	confDir := pickSupervisorConfDir()
 	binDir := "/usr/local/bin"
 	envDir := "/etc/token-usage-watcher"
-	binPath := filepath.Join(binDir, serviceName)
+	binPath := filepath.Join(binDir, Name)
 	envPath := filepath.Join(envDir, "env")
-	confPath := filepath.Join(confDir, serviceName+".conf")
+	confPath := filepath.Join(confDir, Name+".conf")
 
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
@@ -92,12 +113,12 @@ func installSupervisor(self, apiKey, endpoint string, extra []string) error {
 	if len(extra) > 0 {
 		execLine += " " + strings.Join(extra, " ")
 	}
-	conf := "[program:" + serviceName + "]\n" +
+	conf := "[program:" + Name + "]\n" +
 		"command=/bin/bash -c 'set -a; . " + envPath + "; set +a; exec " + execLine + "'\n" +
 		"autostart=true\nautorestart=true\nstartsecs=1\nstartretries=10\n" +
 		"stopsignal=TERM\nstopwaitsecs=10\nuser=root\n" +
-		"stdout_logfile=/var/log/" + serviceName + ".out.log\n" +
-		"stderr_logfile=/var/log/" + serviceName + ".err.log\n" +
+		"stdout_logfile=/var/log/" + Name + ".out.log\n" +
+		"stderr_logfile=/var/log/" + Name + ".err.log\n" +
 		"stdout_logfile_maxbytes=10MB\nstderr_logfile_maxbytes=10MB\n" +
 		"stdout_logfile_backups=3\nstderr_logfile_backups=3\n"
 	if err := os.WriteFile(confPath, []byte(conf), 0o644); err != nil {
@@ -111,39 +132,39 @@ func installSupervisor(self, apiKey, endpoint string, extra []string) error {
 		return err
 	}
 	fmt.Printf("→ installed supervisor program %s\n", confPath)
-	return statusSupervisor()
+	return StatusSupervisor()
 }
 
-func uninstallSupervisor() error {
+func UninstallSupervisor() error {
 	confDir := pickSupervisorConfDir()
-	confPath := filepath.Join(confDir, serviceName+".conf")
-	_ = exec.Command("supervisorctl", "stop", serviceName).Run()
-	_ = exec.Command("supervisorctl", "remove", serviceName).Run()
+	confPath := filepath.Join(confDir, Name+".conf")
+	_ = exec.Command("supervisorctl", "stop", Name).Run()
+	_ = exec.Command("supervisorctl", "remove", Name).Run()
 	_ = os.Remove(confPath)
 	_ = exec.Command("supervisorctl", "reread").Run()
 	_ = exec.Command("supervisorctl", "update").Run()
-	_ = os.Remove("/usr/local/bin/" + serviceName)
+	_ = os.Remove("/usr/local/bin/" + Name)
 	_ = os.RemoveAll("/etc/token-usage-watcher")
 	fmt.Printf("→ uninstalled supervisor program %s\n", confPath)
 	return nil
 }
 
-func statusSupervisor() error {
-	out, err := exec.Command("supervisorctl", "status", serviceName).CombinedOutput()
+func StatusSupervisor() error {
+	out, err := exec.Command("supervisorctl", "status", Name).CombinedOutput()
 	fmt.Printf("  %s", string(out))
 	_ = err
 	return nil
 }
 
-func restartSupervisor() error {
+func RestartSupervisor() error {
 	if _, err := exec.LookPath("supervisorctl"); err != nil {
 		return errors.New("supervisorctl not found in $PATH")
 	}
-	if err := runCmd("supervisorctl", "restart", serviceName); err != nil {
+	if err := runCmd("supervisorctl", "restart", Name); err != nil {
 		return fmt.Errorf("supervisorctl restart: %w", err)
 	}
-	fmt.Printf("→ restarted supervisor program %s\n", serviceName)
-	return statusSupervisor()
+	fmt.Printf("→ restarted supervisor program %s\n", Name)
+	return StatusSupervisor()
 }
 
 func pickSupervisorConfDir() string {
@@ -155,7 +176,7 @@ func pickSupervisorConfDir() string {
 
 // runCmd / copySelf live here so the !linux file can omit them without
 // running into "declared but not used" issues. They're trivial and only
-// invoked by supervisorAvailable=true platforms anyway.
+// invoked by SupervisorAvailable=true platforms anyway.
 func runCmd(name string, args ...string) error {
 	c := exec.Command(name, args...)
 	c.Stdout = os.Stdout

@@ -1,6 +1,6 @@
 //go:build darwin
 
-package install
+package svc
 
 import (
 	"errors"
@@ -18,13 +18,29 @@ import (
 //
 // `launchctl` is part of macOS — checked at install time for early failure.
 
-// supervisorAvailable is false on macOS (no supervisord port).
-func supervisorAvailable() bool { return false }
+// SupervisorAvailable is false on macOS (no supervisord port).
+func SupervisorAvailable() bool { return false }
 
-// platformPreInstall runs before kardianos service.Install(). Bails out
+// DefaultBackends is the ordered preference list of backends to try on
+// the current process. macOS has no supervisord port; only the two
+// launchd modes are candidates.
+//
+// macOS root     -> [system, user]   (machine-wide first)
+// macOS non-root -> [user]
+func DefaultBackends() []string {
+	if os.Geteuid() == 0 {
+		return []string{"system", "user"}
+	}
+	return []string{"user"}
+}
+
+// SupervisorInstalled is always false on macOS — never available here.
+func SupervisorInstalled() bool { return false }
+
+// PlatformPreInstall runs before kardianos service.Install(). Bails out
 // early with a clear message when the host environment can't host the
 // chosen backend.
-func platformPreInstall(backend string) error {
+func PlatformPreInstall(backend string) error {
 	if _, err := exec.LookPath("launchctl"); err != nil {
 		return errors.New("launchctl not found in $PATH; install Xcode Command Line Tools")
 	}
@@ -34,30 +50,30 @@ func platformPreInstall(backend string) error {
 	return nil
 }
 
-// platformInstallHint returns a one-liner shown after a successful install,
+// PlatformInstallHint returns a one-liner shown after a successful install,
 // pointing the user at the plist that was written.
-func platformInstallHint(backend string) string {
+func PlatformInstallHint(backend string) string {
 	home, _ := os.UserHomeDir()
 	switch backend {
 	case "user":
-		return "plist: " + filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
+		return "plist: " + filepath.Join(home, "Library", "LaunchAgents", Name+".plist")
 	case "system":
-		return "plist: /Library/LaunchDaemons/" + serviceName + ".plist"
+		return "plist: /Library/LaunchDaemons/" + Name + ".plist"
 	}
 	return ""
 }
 
 // supervisord stubs — Linux-only feature; surface a clear error here.
-func installSupervisor(_, _, _ string, _ []string) error {
+func InstallSupervisor(_, _, _ string, _ []string) error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }
-func uninstallSupervisor() error {
+func UninstallSupervisor() error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }
-func statusSupervisor() error {
-	fmt.Printf("  %s: (--backend supervisor not available on %s)\n", serviceName, runtime.GOOS)
+func StatusSupervisor() error {
+	fmt.Printf("  %s: (--backend supervisor not available on %s)\n", Name, runtime.GOOS)
 	return nil
 }
-func restartSupervisor() error {
+func RestartSupervisor() error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }

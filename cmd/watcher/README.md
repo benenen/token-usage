@@ -100,41 +100,42 @@ token-usage-watcher install \
 ```
 
 The binary self-copies into a stable location and a 0600 env file holds the
-API key. Each OS uses its native supervisor — pick a backend that fits:
+API key. There is no `--backend` flag — `install` walks a per-OS ordered
+list of candidates and picks the first one whose pre-flight check passes,
+printing what it tried and what it picked. `uninstall` / `restart` walk
+the same list and act on every candidate that has a unit on disk;
+`status` reports each candidate's state.
 
-| OS       | `--backend` (default in bold)                                       | Notes                                                  |
-| -------- | ------------------------------------------------------------------- | ------------------------------------------------------ |
-| Linux    | **`user`** (systemd-user) / `system` (systemd-system) / `supervisor`| `system` + `supervisor` need root.                     |
-| macOS    | **`user`** (launchd LaunchAgent) / `system` (launchd LaunchDaemon)  | `system` needs root.                                   |
-| Windows  | **`system`** (Windows SCM)                                          | Needs Administrator. No user-level services on Win.    |
+| OS              | Preference order (root vs non-root)                                       |
+| --------------- | ------------------------------------------------------------------------- |
+| Linux root      | systemd-system → supervisord → systemd-user                               |
+| Linux non-root  | systemd-user                                                              |
+| macOS root      | launchd LaunchDaemon → launchd LaunchAgent                                |
+| macOS non-root  | launchd LaunchAgent                                                       |
+| Windows         | Windows SCM (requires Administrator; no per-user services on Win)         |
 
 Examples:
 
 ```bash
-# Linux: per-user systemd unit, no root
+# Linux non-root: installs systemd-user (only candidate)
 token-usage-watcher install --api-key … --endpoint …
 
-# Linux: system-wide unit
-sudo token-usage-watcher install --backend system --api-key … --endpoint …
-
-# Container with supervisord (PID 1):
-sudo token-usage-watcher install --backend supervisor --api-key … --endpoint …
+# Linux root: installs systemd-system; falls back to supervisord
+# (if systemctl is missing or fails) and then systemd-user
+sudo token-usage-watcher install --api-key … --endpoint …
 
 # Windows: in an elevated PowerShell
-token-usage-watcher.exe install --backend system --api-key … --endpoint …
+token-usage-watcher.exe install --api-key … --endpoint …
 ```
 
-`install` is idempotent — re-running with different flags replaces the
-existing unit cleanly.
+`install` is idempotent — re-running replaces any existing unit cleanly.
 
 #### Status / restart / uninstall
 
 ```bash
-token-usage-watcher status                    # all backends on this OS
-token-usage-watcher status --backend system   # one backend
-token-usage-watcher restart                   # restart the installed service (default --backend user)
-token-usage-watcher restart --backend system  # restart the system-wide service
-token-usage-watcher uninstall                 # default --backend user; --backend system / supervisor as needed
+token-usage-watcher status      # walks every candidate backend on this OS
+token-usage-watcher restart     # restart whichever candidate is installed
+token-usage-watcher uninstall   # uninstall whichever candidates are installed
 ```
 
 Or use the native tools directly:
