@@ -171,8 +171,11 @@ sha256 is stored — leaked DB dumps cannot replay against the API.
 --once               run one scan and exit       (useful for cron / manual backfill)
 ```
 
-Today only the Claude Code JSONL format is parsed. Adding Codex / OpenCode is a
-parser branch in `internal/watcher/scanner.go`; the rest of the pipeline
+Supported tools today: **claude-code** (`~/.claude/projects/**/*.jsonl`),
+**codex** (`~/.codex/sessions/**/*.jsonl`), and **opencode**
+(`~/.local/share/opencode/opencode.db`, a single SQLite file). The watcher
+auto-detects whichever of these exist on the box. Adding a new tool is a
+new file under `internal/watcher/parsers/`; the rest of the pipeline
 (checkpoint, batching, auth, schema) is format-agnostic.
 
 ---

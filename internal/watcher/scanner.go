@@ -3,6 +3,7 @@ package watcher
 import (
 	"io/fs"
 	"log"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -55,6 +56,26 @@ func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 			}
 			pending := make(map[string]FileState)
 			var recs []types.UsageRecord
+
+			// Source.Root may be a single file (e.g. opencode's SQLite db)
+			// rather than a directory of *.jsonl. In that case skip WalkDir
+			// and hand the parser the file path directly — checkpoint keys
+			// the same way (one entry per absolute path).
+			if info, err := os.Stat(src.Root); err == nil && !info.IsDir() {
+				prev, _ := s.Checkpoint.Get(src.Root)
+				r, state, perr := parser.Scan(src.Root, src.Tool, prev, s.BackfillCutoff, now)
+				if perr != nil {
+					log.Printf("scanner: parse %s (%s): %v", src.Root, src.Tool, perr)
+				} else {
+					if len(r) > 0 {
+						recs = append(recs, r...)
+					}
+					pending[src.Root] = state
+				}
+				results[i] = result{recs: recs, pending: pending}
+				return
+			}
+
 			err := filepath.WalkDir(src.Root, func(path string, d fs.DirEntry, werr error) error {
 				if werr != nil {
 					return nil // skip unreadable subtrees
