@@ -234,7 +234,7 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 		// looks like "I ingested 42 records but the dashboard didn't move".
 		status := fmt.Sprintf("accepted=%d duplicates=%d", res.Accepted, res.Duplicates)
 		if res.Spooled {
-			status = "spooled (server unreachable)"
+			status = fmt.Sprintf("spooled (post failed: %v) — will retry on next tick", res.SpoolReason)
 		}
 		log.Printf("  batch %d/%d sent (%d records, %s elapsed): %s",
 			idx, batches, end-start, time.Since(sendStart).Round(time.Millisecond), status)
@@ -247,9 +247,9 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 	}
 	if err := ckpt.Save(); err != nil {
 		log.Printf("save checkpoint: %v", err)
-		return
 	}
-	log.Printf("ingested %d records across %d files", len(recs), len(pending))
+	// (No "ingested N" summary line — per-batch "accepted=… duplicates=…"
+	//  already says exactly what landed on the server.)
 }
 
 // formatPerToolScan renders the per-tool "new/walked" summary used by
