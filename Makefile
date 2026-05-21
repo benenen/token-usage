@@ -1,6 +1,13 @@
 BIN     ?= bin
 GOFLAGS ?= -trimpath
 
+# `make release` cross-compiles ./cmd/watcher for these targets and packages
+# each as tar.gz (unix) or zip (windows) under $(RELEASE_DIR). Override
+# VERSION to stamp the archive filename (defaults to `git describe`).
+RELEASE_DIR     ?= dist
+RELEASE_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+RELEASE_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
 # Docker image config (override at the CLI, e.g. `make docker IMAGE_TAG=v1.0.0`)
 IMAGE_NAME ?= token-usage-server
 IMAGE_TAG  ?= dev
@@ -15,7 +22,7 @@ DOCKER_PROXY_ARGS = $(if $(HTTPS_PROXY),--build-arg HTTPS_PROXY=$(HTTPS_PROXY)) 
                     $(if $(NO_PROXY),--build-arg NO_PROXY=$(NO_PROXY)) \
                     --build-arg GOPROXY=$(GOPROXY)
 
-.PHONY: all build server watcher tidy test fmt vet clean docker docker-multi docker-run docker-prepull
+.PHONY: all build server watcher tidy test fmt vet clean release docker docker-multi docker-run docker-prepull
 
 all: build
 
@@ -40,7 +47,29 @@ vet:
 	go vet ./...
 
 clean:
-	rm -rf $(BIN)
+	rm -rf $(BIN) $(RELEASE_DIR)
+
+release:
+	@command -v zip >/dev/null || { echo "zip not found — needed for the windows archive"; exit 1; }
+	@rm -rf $(RELEASE_DIR) && mkdir -p $(RELEASE_DIR)
+	@set -eu; for target in $(RELEASE_TARGETS); do \
+	    goos=$${target%/*}; goarch=$${target#*/}; \
+	    ext=""; [ "$$goos" = "windows" ] && ext=".exe"; \
+	    bin="token-usage-watcher$$ext"; \
+	    archive="token-usage-watcher_$(RELEASE_VERSION)_$${goos}_$${goarch}"; \
+	    echo "==> $$goos/$$goarch"; \
+	    GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 \
+	        go build -trimpath -ldflags="-s -w" \
+	        -o "$(RELEASE_DIR)/$$bin" ./cmd/watcher; \
+	    if [ "$$goos" = "windows" ]; then \
+	        (cd $(RELEASE_DIR) && zip -q "$$archive.zip" "$$bin"); \
+	    else \
+	        tar -C $(RELEASE_DIR) -czf "$(RELEASE_DIR)/$$archive.tar.gz" "$$bin"; \
+	    fi; \
+	    rm -f "$(RELEASE_DIR)/$$bin"; \
+	done
+	@(cd $(RELEASE_DIR) && sha256sum *.tar.gz *.zip > SHA256SUMS)
+	@echo; ls -lh $(RELEASE_DIR)
 
 # Pre-pull every base image used by the Dockerfile into the local Docker
 # daemon. Useful in restricted networks where the daemon can't reach
