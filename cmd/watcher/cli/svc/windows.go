@@ -30,6 +30,21 @@ func DefaultBackends() []string { return []string{"system"} }
 // SupervisorInstalled is always false on Windows.
 func SupervisorInstalled() bool { return false }
 
+// ShowLogs queries the Application event log via PowerShell for events
+// whose Provider matches our service name. Tail-follow (`-f`) isn't
+// supported here — Windows event logs have no native "watch" CLI —
+// so we surface a clean error pointing the user at Event Viewer's
+// live view, where the same filter is one click away.
+func ShowLogs(backend string, follow bool) error {
+	if follow {
+		return errors.New("-f isn't supported on Windows event logs; use Event Viewer's live view (filter by Source = " + Name + ")")
+	}
+	ps := "Get-WinEvent -LogName Application -MaxEvents 200 " +
+		"-FilterXPath \"*[System[Provider[@Name='" + Name + "']]]\" " +
+		"-ErrorAction SilentlyContinue | Format-Table TimeCreated, LevelDisplayName, Message -AutoSize -Wrap"
+	return runStdio("powershell.exe", "-NoProfile", "-Command", ps)
+}
+
 func PlatformPreInstall(backend string) error {
 	if backend != "system" {
 		return nil // serviceConfig already rejects --backend user on Windows

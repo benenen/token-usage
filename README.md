@@ -182,6 +182,7 @@ token-usage-watcher [run]   tail transcripts and ship usage (default if no subco
                   uninstall stop and remove the installed service
                   restart   restart the installed service
                   status    show service status across every per-OS backend
+                  logs      show service log output (-f to tail-follow)
 ```
 
 `run`-mode flags:

@@ -42,6 +42,45 @@ func DefaultBackends() []string {
 	return []string{"system", "user"}
 }
 
+// ShowLogs streams (when follow is true) or prints the last 200 lines
+// from whichever log source backs the given backend:
+//
+//   user        journalctl --user -u <Name>
+//   system      journalctl -u <Name>
+//   supervisor  tail /var/log/<Name>.{out,err}.log
+//
+// Inherits stdio so Ctrl-C lands on the child as expected.
+func ShowLogs(backend string, follow bool) error {
+	switch backend {
+	case "user":
+		return journalctl(follow, "--user", "-u", Name)
+	case "system":
+		return journalctl(follow, "-u", Name)
+	case "supervisor":
+		args := []string{"-n", "200"}
+		if follow {
+			args = append(args, "-f")
+		}
+		args = append(args,
+			"/var/log/"+Name+".out.log",
+			"/var/log/"+Name+".err.log",
+		)
+		return runStdio("tail", args...)
+	}
+	return fmt.Errorf("backend %q has no log source on linux", backend)
+}
+
+func journalctl(follow bool, head ...string) error {
+	args := append([]string{}, head...)
+	args = append(args, "--no-pager")
+	if follow {
+		args = append(args, "-f")
+	} else {
+		args = append(args, "-n", "200")
+	}
+	return runStdio("journalctl", args...)
+}
+
 // SupervisorInstalled reports whether a supervisord program file for
 // this service exists. Used by uninstall/restart to skip backends that
 // were never installed without surfacing scary "not installed" errors.
@@ -138,10 +177,10 @@ func InstallSupervisor(self, apiKey, endpoint string, extra []string) error {
 		return err
 	}
 
-	if err := runCmd("supervisorctl", "reread"); err != nil {
+	if err := runStdio("supervisorctl", "reread"); err != nil {
 		return err
 	}
-	if err := runCmd("supervisorctl", "update"); err != nil {
+	if err := runStdio("supervisorctl", "update"); err != nil {
 		return err
 	}
 	fmt.Printf("→ installed supervisor program %s\n", confPath)
@@ -173,7 +212,7 @@ func RestartSupervisor() error {
 	if _, err := exec.LookPath("supervisorctl"); err != nil {
 		return errors.New("supervisorctl not found in $PATH")
 	}
-	if err := runCmd("supervisorctl", "restart", Name); err != nil {
+	if err := runStdio("supervisorctl", "restart", Name); err != nil {
 		return fmt.Errorf("supervisorctl restart: %w", err)
 	}
 	fmt.Printf("→ restarted supervisor program %s\n", Name)
@@ -187,16 +226,8 @@ func pickSupervisorConfDir() string {
 	return "/etc/supervisor/conf.d"
 }
 
-// runCmd / copySelf live here so the !linux file can omit them without
-// running into "declared but not used" issues. They're trivial and only
-// invoked by SupervisorAvailable=true platforms anyway.
-func runCmd(name string, args ...string) error {
-	c := exec.Command(name, args...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
-}
-
+// copySelf streams the running binary to dst with an atomic
+// tmp+rename — used by the supervisord backend's binary self-install.
 func copySelf(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

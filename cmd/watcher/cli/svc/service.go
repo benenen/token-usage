@@ -12,6 +12,8 @@ package svc
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"runtime"
 
 	"github.com/kardianos/service"
@@ -90,6 +92,18 @@ func SupervisorFlagHelp() string {
 		return " | supervisor"
 	}
 	return ""
+}
+
+// runStdio runs name+args with the parent's stdio inherited, so things
+// like `journalctl -f` / `tail -f` / `log stream` stream live to the
+// user's terminal and propagate Ctrl-C the way they'd expect from a
+// hand-typed shell command.
+func runStdio(name string, args ...string) error {
+	c := exec.Command(name, args...)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	c.Stdin = os.Stdin
+	return c.Run()
 }
 
 // IsInstalled reports whether the given backend currently has a unit

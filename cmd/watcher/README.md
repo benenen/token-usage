@@ -131,13 +131,24 @@ token-usage-watcher.exe install --api-key … --endpoint …
 
 `install` is idempotent — re-running replaces any existing unit cleanly.
 
-#### Status / restart / uninstall
+#### Status / restart / logs / uninstall
 
 ```bash
 token-usage-watcher status      # walks every candidate backend on this OS
 token-usage-watcher restart     # restart whichever candidate is installed
+token-usage-watcher logs        # print recent log output for installed backend(s)
+token-usage-watcher logs -f     # tail-follow (journalctl -f / tail -f / log stream)
 token-usage-watcher uninstall   # uninstall whichever candidates are installed
 ```
+
+Log source per backend:
+
+| Backend                            | Source                                                       |
+| ---------------------------------- | ------------------------------------------------------------ |
+| systemd-user / systemd-system      | `journalctl [--user] -u token-usage-watcher` (200 lines / -f)|
+| supervisord                        | `tail` of `/var/log/token-usage-watcher.{out,err}.log`       |
+| launchd (macOS, user + system)     | `log show --predicate 'process == "token-usage-watcher"'` (or `log stream` with -f) |
+| Windows SCM                        | `Get-WinEvent -LogName Application` filtered to the service; **`-f` not supported** (use Event Viewer's live view) |
 
 Or use the native tools directly:
 

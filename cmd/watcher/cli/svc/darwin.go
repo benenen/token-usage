@@ -37,6 +37,18 @@ func DefaultBackends() []string {
 // SupervisorInstalled is always false on macOS — never available here.
 func SupervisorInstalled() bool { return false }
 
+// ShowLogs uses macOS's unified logging (`log show` / `log stream`)
+// filtered to our process name. The kardianos plist doesn't configure
+// StandardOutPath/StandardErrorPath, so stdout/stderr never hit disk
+// directly — the unified log is the only built-in source.
+func ShowLogs(backend string, follow bool) error {
+	pred := fmt.Sprintf("process == %q", Name)
+	if follow {
+		return runStdio("log", "stream", "--predicate", pred)
+	}
+	return runStdio("log", "show", "--predicate", pred, "--last", "1h", "--style", "compact")
+}
+
 // PlatformPreInstall runs before kardianos service.Install(). Bails out
 // early with a clear message when the host environment can't host the
 // chosen backend.

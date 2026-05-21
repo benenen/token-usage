@@ -35,7 +35,8 @@ Subcommands:
   install    install as a service (systemd user / system / supervisord)
   uninstall  stop and remove the service
   restart    restart the installed service
-  status     show service status`,
+  status     show service status
+  logs       show service log output (-f to tail-follow)`,
 		SilenceUsage: true,
 		RunE:         runE,
 	}
@@ -54,6 +55,7 @@ Subcommands:
 		cli.NewUninstallCmd(),
 		cli.NewRestartCmd(),
 		cli.NewStatusCmd(),
+		cli.NewLogsCmd(),
 	)
 	return root
 }
