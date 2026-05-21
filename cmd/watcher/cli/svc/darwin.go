@@ -86,6 +86,12 @@ func StatusSupervisor() error {
 	fmt.Printf("  %s: (--backend supervisor not available on %s)\n", Name, runtime.GOOS)
 	return nil
 }
+func StopSupervisor() error {
+	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
+}
+func StartSupervisor() error {
+	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
+}
 func RestartSupervisor() error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }

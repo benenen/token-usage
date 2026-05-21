@@ -34,9 +34,12 @@ Subcommands:
   run        run the watcher (default)
   install    install as a service (systemd user / system / supervisord)
   uninstall  stop and remove the service
+  start      start the installed service
+  stop       stop the installed service (without removing it)
   restart    restart the installed service
   status     show service status
-  logs       show service log output (-f to tail-follow)`,
+  logs       show service log output (-f to tail-follow)
+  cleanup    stop, clear local spool/buffer, restart (with --with-checkpoint to force re-scan)`,
 		SilenceUsage: true,
 		RunE:         runE,
 	}
@@ -53,9 +56,12 @@ Subcommands:
 		runCmd,
 		cli.NewInstallCmd(),
 		cli.NewUninstallCmd(),
+		cli.NewStartCmd(),
+		cli.NewStopCmd(),
 		cli.NewRestartCmd(),
 		cli.NewStatusCmd(),
 		cli.NewLogsCmd(),
+		cli.NewCleanupCmd(),
 	)
 	return root
 }

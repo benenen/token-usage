@@ -131,14 +131,23 @@ token-usage-watcher.exe install --api-key … --endpoint …
 
 `install` is idempotent — re-running replaces any existing unit cleanly.
 
-#### Status / restart / logs / uninstall
+#### Lifecycle / inspection / cleanup
 
 ```bash
 token-usage-watcher status      # walks every candidate backend on this OS
-token-usage-watcher restart     # restart whichever candidate is installed
+token-usage-watcher start       # start whichever candidate is installed
+token-usage-watcher stop        # stop the installed service (does NOT remove it)
+token-usage-watcher restart     # stop + start the installed service
 token-usage-watcher logs        # print recent log output for installed backend(s)
 token-usage-watcher logs -f     # tail-follow (journalctl -f / tail -f / log stream)
 token-usage-watcher uninstall   # uninstall whichever candidates are installed
+
+# Recovery helper: stop → clear ~/.token-usage-watcher/buffer/* → start
+# With --with-checkpoint, also drops checkpoint.json so every source
+# file is re-read from the start (server dedups; missing records become
+# the accepted=… count, already-ingested ones become duplicates=…).
+token-usage-watcher cleanup
+token-usage-watcher cleanup --with-checkpoint
 ```
 
 Log source per backend:

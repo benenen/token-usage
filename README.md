@@ -180,9 +180,14 @@ Subcommands (run with `--help` for details):
 token-usage-watcher [run]   tail transcripts and ship usage (default if no subcommand)
                   install   self-install as a native service (auto-pick backend)
                   uninstall stop and remove the installed service
+                  start     start the installed service
+                  stop      stop the installed service (without removing it)
                   restart   restart the installed service
                   status    show service status across every per-OS backend
                   logs      show service log output (-f to tail-follow)
+                  cleanup   stop → clear ~/.token-usage-watcher/buffer → start
+                            (--with-checkpoint also drops checkpoint.json
+                             to force a full re-scan)
 ```
 
 `run`-mode flags:

@@ -217,6 +217,26 @@ func StatusSupervisor() error {
 	return nil
 }
 
+func StopSupervisor() error {
+	if _, err := exec.LookPath("supervisorctl"); err != nil {
+		return errors.New("supervisorctl not found in $PATH")
+	}
+	if err := runStdio("supervisorctl", "stop", Name); err != nil {
+		return fmt.Errorf("supervisorctl stop: %w", err)
+	}
+	return nil
+}
+
+func StartSupervisor() error {
+	if _, err := exec.LookPath("supervisorctl"); err != nil {
+		return errors.New("supervisorctl not found in $PATH")
+	}
+	if err := runStdio("supervisorctl", "start", Name); err != nil {
+		return fmt.Errorf("supervisorctl start: %w", err)
+	}
+	return nil
+}
+
 func RestartSupervisor() error {
 	if _, err := exec.LookPath("supervisorctl"); err != nil {
 		return errors.New("supervisorctl not found in $PATH")
