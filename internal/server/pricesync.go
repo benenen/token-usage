@@ -40,10 +40,15 @@ const (
 	PriceSyncMaxBackoff      = 30 * time.Second
 )
 
-// SyncPrices fetches the LiteLLM table (with retry), filters to
-// Anthropic + OpenAI chat/completion entries, normalizes their names,
-// and upserts each model's prices into the DB. Returns how many entries
-// were considered vs. how many actually wrote a new history row.
+// SyncPrices fetches the LiteLLM table (with retry), filters to any
+// chat/completion entry (across every provider — Anthropic, OpenAI,
+// Google, DeepSeek, Together, Cohere, Mistral, Groq, Bedrock, etc.),
+// normalizes their names, and upserts each model's prices into the
+// DB. Models that aren't in this synced set and don't match any
+// `defaultRates` prefix are priced at $0 via the `/summary`
+// LATERAL-JOIN's COALESCE — by design, an unknown model never blows
+// up totals with a stale guess. Returns how many entries were
+// considered vs. how many actually wrote a new history row.
 func SyncPrices(ctx context.Context, store *Store, sourceURL string, client *http.Client) (considered, changed int, err error) {
 	if sourceURL == "" {
 		sourceURL = DefaultPriceSourceURL
@@ -68,9 +73,6 @@ func SyncPrices(ctx context.Context, store *Store, sourceURL string, client *htt
 
 	for name, e := range raw {
 		if e.Mode != "" && e.Mode != "chat" && e.Mode != "completion" {
-			continue
-		}
-		if e.LiteLLMProvider != "anthropic" && e.LiteLLMProvider != "openai" {
 			continue
 		}
 		if e.InputCostPerToken == nil || e.OutputCostPerToken == nil {
