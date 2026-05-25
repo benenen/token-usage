@@ -7,11 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -96,34 +94,24 @@ func DoRun(c *cobra.Command, cfg *RunConfig, home string) error {
 		BufferDir: cfg.BufferDir,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		log.Print("shutdown signal received; finishing current scan… (Ctrl+C again to force-exit)")
-		cancel()
-		<-sigCh
-		log.Print("second signal — exiting immediately")
-		os.Exit(130)
-	}()
-
-	log.Printf("watcher: endpoint=%s machine=%s key=%s sources=[%s] interval=%s",
-		cfg.Endpoint, machine, displayKey(cfg.APIKey), formatSources(sources), cfg.Interval)
-
-	tick := time.NewTicker(cfg.Interval)
-	defer tick.Stop()
-	for {
-		runOnce(ctx, sc, up, ckpt, cfg.Batch)
-		if cfg.Once {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-tick.C:
+	loop := func(ctx context.Context) error {
+		log.Printf("watcher: endpoint=%s machine=%s key=%s sources=[%s] interval=%s",
+			cfg.Endpoint, machine, displayKey(cfg.APIKey), formatSources(sources), cfg.Interval)
+		tick := time.NewTicker(cfg.Interval)
+		defer tick.Stop()
+		for {
+			runOnce(ctx, sc, up, ckpt, cfg.Batch)
+			if cfg.Once {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-tick.C:
+			}
 		}
 	}
+	return runUnderService(loop)
 }
 
 // resolveSources walks the precedence: explicit --source > --root/--tool > auto-detect.
