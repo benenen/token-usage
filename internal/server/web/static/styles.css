@@ -507,6 +507,57 @@ body::before {
   transition: width .6s cubic-bezier(.2,.8,.2,1);
 }
 
+/* -------- heatmap (GitHub-style daily activity) ---------- */
+.heatmap-scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.heatmap-scale .hs-cell {
+  display: inline-block;
+  width: 11px; height: 11px;
+  border-radius: 2px;
+}
+.heatmap-scale .hs-cell[data-lvl="0"] { background: #1a212c; }
+.heatmap-scale .hs-cell[data-lvl="1"] { background: #3a2a1d; }
+.heatmap-scale .hs-cell[data-lvl="2"] { background: #7a3a1d; }
+.heatmap-scale .hs-cell[data-lvl="3"] { background: #c64b1a; }
+.heatmap-scale .hs-cell[data-lvl="4"] { background: #ff5c1a; }
+
+.heatmap-wrap {
+  position: relative;
+  margin-top: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+#heatmap {
+  display: block;
+  width: 100%;
+  min-width: 720px;
+  height: auto;
+}
+.heatmap-cell {
+  transition: filter .12s ease, stroke-opacity .12s ease;
+  cursor: crosshair;
+  stroke: var(--bone);
+  stroke-width: 1;
+  stroke-opacity: 0;
+}
+.heatmap-cell:hover {
+  filter: brightness(1.35);
+  stroke-opacity: 0.8;
+}
+.heatmap-month,
+.heatmap-day {
+  fill: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
 /* -------- ledger ---------- */
 .ledger-controls input {
   background: var(--ink-deep);

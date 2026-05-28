@@ -72,7 +72,26 @@
     </div>
   </section>
 
-  <section class="card stagger" style="--idx:2">
+  <section class="card span-full stagger" style="--idx:2">
+    <header class="card-head">
+      <h2><em class="serif-i">Activity</em> <span class="dim">// daily token totals · last 53 weeks</span></h2>
+      <div class="heatmap-scale" aria-label="intensity scale">
+        <span class="dim small">less</span>
+        <span class="hs-cell" data-lvl="0"></span>
+        <span class="hs-cell" data-lvl="1"></span>
+        <span class="hs-cell" data-lvl="2"></span>
+        <span class="hs-cell" data-lvl="3"></span>
+        <span class="hs-cell" data-lvl="4"></span>
+        <span class="dim small">more</span>
+      </div>
+    </header>
+    <div class="heatmap-wrap">
+      <svg id="heatmap" preserveAspectRatio="xMinYMid meet" aria-label="daily token usage heatmap"></svg>
+      <div id="heatmap-tooltip" class="tooltip" hidden></div>
+    </div>
+  </section>
+
+  <section class="card stagger" style="--idx:3">
     <header class="card-head">
       <h2><em class="serif-i">Models</em></h2>
       <span class="dim small">by spend</span>
@@ -80,7 +99,7 @@
     <ol class="rank" id="model-rank"></ol>
   </section>
 
-  <section class="card stagger" style="--idx:3">
+  <section class="card stagger" style="--idx:4">
     <header class="card-head">
       <h2><em class="serif-i">Users</em></h2>
       <span class="dim small">by spend</span>
@@ -88,7 +107,7 @@
     <ol class="rank" id="user-rank"></ol>
   </section>
 
-  <section class="card stagger" style="--idx:4">
+  <section class="card stagger" style="--idx:5">
     <header class="card-head">
       <h2><em class="serif-i">Tools</em></h2>
       <span class="dim small">by spend</span>
@@ -96,7 +115,7 @@
     <ol class="rank" id="tool-rank"></ol>
   </section>
 
-  <section class="card span-full stagger" style="--idx:5">
+  <section class="card span-full stagger" style="--idx:6">
     <header class="card-head">
       <h2><em class="serif-i">Ledger</em> <span class="dim">// day · user · model</span></h2>
       <div class="ledger-controls">

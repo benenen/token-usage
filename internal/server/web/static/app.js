@@ -111,6 +111,9 @@
     modelRank:    $("model-rank"),
     userRank:     $("user-rank"),
     toolRank:     $("tool-rank"),
+    heatmap:      $("heatmap"),
+    heatmapWrap:  document.querySelector(".heatmap-wrap"),
+    heatmapTip:   $("heatmap-tooltip"),
     priceModal:   $("price-modal"),
     priceTitle:   $("price-title"),
     priceLegend:  $("price-legend"),
@@ -219,6 +222,7 @@
 
     renderLegend(byModel);
     renderBars(byDay, byModel);
+    renderHeatmap(byDay);
     renderRank(els.modelRank, byModel, "model");
     renderRank(els.userRank, byUser, "none");
     renderRank(els.toolRank, byTool, "tool");
@@ -233,6 +237,7 @@
     [els.totalIn, els.totalOut, els.totalCw, els.totalCr, els.totalTok, els.totalMsgs].forEach(e => e.textContent = "—");
     clear(els.legend); clear(els.svg); clear(els.yaxis);
     clear(els.modelRank); clear(els.userRank); clear(els.toolRank); clear(els.ledgerBody);
+    renderHeatmap([]);
     els.heroSavings.textContent = "";
     els.emptyEndpoint.textContent = `${location.protocol}//${location.host}/ingest`;
   }
@@ -452,6 +457,130 @@
     }
     return out;
   }
+
+  // ---- heatmap (GitHub-style year activity) -------------------------------
+  // Always renders a 53-week × 7-day grid ending today (UTC), regardless of
+  // the range picker. Cells outside state.rows just stay at level 0.
+  const HEATMAP_COLORS = ["#1a212c", "#3a2a1d", "#7a3a1d", "#c64b1a", "#ff5c1a"];
+  const HEATMAP_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const HEATMAP_DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""]; // Sun..Sat
+
+  function heatmapLevel(v, max) {
+    if (v <= 0 || max <= 0) return 0;
+    const t = v / max;
+    if (t < 0.25) return 1;
+    if (t < 0.50) return 2;
+    if (t < 0.75) return 3;
+    return 4;
+  }
+
+  function renderHeatmap(byDay) {
+    const svgEl = els.heatmap;
+    clear(svgEl);
+    const weeks = 53, days = 7;
+    const cell = 12, gap = 3;
+    const step = cell + gap;
+    const padL = 30, padT = 18, padR = 4, padB = 4;
+    const W = padL + weeks * step + padR;
+    const H = padT + days * step + padB;
+    svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+    const byDayMap = new Map(byDay.map(d => [d.day, d.totalTokens]));
+
+    // Color-scale anchor: use the 95th percentile of non-zero days so a
+    // single outlier doesn't squash every other day into level 1.
+    const vals = [...byDayMap.values()].filter(v => v > 0).sort((a, b) => a - b);
+    const max = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.95))] : 1;
+
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const todayDow = today.getUTCDay(); // 0 = Sun
+
+    // Month labels: emit one when the top-of-column (Sunday) moves into a
+    // new month. Only emit if there's room before the next label.
+    let lastMonth = -1, lastLabelCol = -99;
+    for (let col = 0; col < weeks; col++) {
+      const daysBack = (weeks - 1 - col) * 7 + todayDow;
+      const d = new Date(today);
+      d.setUTCDate(today.getUTCDate() - daysBack);
+      const m = d.getUTCMonth();
+      if (m !== lastMonth && col - lastLabelCol >= 3) {
+        lastMonth = m; lastLabelCol = col;
+        const t = svg("text", {
+          x: padL + col * step,
+          y: padT - 6,
+          class: "heatmap-month",
+        });
+        t.textContent = HEATMAP_MONTHS[m];
+        svgEl.appendChild(t);
+      } else if (m !== lastMonth) {
+        lastMonth = m;
+      }
+    }
+
+    // Day-of-week labels along the left.
+    for (let row = 0; row < days; row++) {
+      if (!HEATMAP_DAY_LABELS[row]) continue;
+      const t = svg("text", {
+        x: padL - 6,
+        y: padT + row * step + cell - 2,
+        "text-anchor": "end",
+        class: "heatmap-day",
+      });
+      t.textContent = HEATMAP_DAY_LABELS[row];
+      svgEl.appendChild(t);
+    }
+
+    // Cells.
+    for (let col = 0; col < weeks; col++) {
+      for (let row = 0; row < days; row++) {
+        const daysBack = (weeks - 1 - col) * 7 + (todayDow - row);
+        if (daysBack < 0) continue; // future days in current week
+        const d = new Date(today);
+        d.setUTCDate(today.getUTCDate() - daysBack);
+        const key = d.toISOString().slice(0, 10);
+        const v = byDayMap.get(key) || 0;
+        const lvl = heatmapLevel(v, max);
+        const rect = svg("rect", {
+          x: padL + col * step,
+          y: padT + row * step,
+          width: cell, height: cell,
+          rx: 2, ry: 2,
+          fill: HEATMAP_COLORS[lvl],
+          class: "heatmap-cell",
+        });
+        rect.addEventListener("mouseenter", (e) => showHeatmapTip(e, key, v));
+        rect.addEventListener("mousemove", moveHeatmapTip);
+        rect.addEventListener("mouseleave", hideHeatmapTip);
+        svgEl.appendChild(rect);
+      }
+    }
+  }
+
+  function showHeatmapTip(e, iso, v) {
+    const t = els.heatmapTip;
+    clear(t);
+    t.appendChild(el("div", { class: "tt-day" }, `${iso} (${weekday(iso)})`));
+    t.appendChild(el("div", { class: "tt-total" }, [
+      el("span", null, "TOKENS"),
+      el("span", null, v > 0 ? fmtTokens(v) : "—"),
+    ]));
+    t.hidden = false;
+    moveHeatmapTip(e);
+  }
+  function moveHeatmapTip(e) {
+    const t = els.heatmapTip;
+    const wrap = els.heatmapWrap.getBoundingClientRect();
+    const tw = t.offsetWidth, th = t.offsetHeight;
+    const cx = e.clientX - wrap.left, cy = e.clientY - wrap.top;
+    let left = cx - tw / 2;
+    let top  = cy - th - 10;
+    left = Math.max(4, Math.min(left, wrap.width - tw - 4));
+    if (top < 4) top = cy + 14;
+    t.style.left = left + "px";
+    t.style.top  = top + "px";
+  }
+  function hideHeatmapTip() { els.heatmapTip.hidden = true; }
 
   function niceCeil(v) {
     if (v <= 0) return 1;
