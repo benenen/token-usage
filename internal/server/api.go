@@ -23,6 +23,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	// network — put nginx auth / mTLS in front for stricter access.
 	mux.HandleFunc("/ingest", a.handleIngest)
 	mux.HandleFunc("/summary", a.handleSummary)
+	mux.HandleFunc("/clock", a.handleClock)
 	mux.HandleFunc("/users", a.handleUsers)
 	mux.HandleFunc("/prices", a.handlePrices)
 	mux.HandleFunc("/healthz", a.handleHealth)
@@ -139,6 +140,46 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 			Total:    row.Input + row.Output + row.CacheCC + row.CacheRR,
 			Messages: row.Messages,
 			Cost:     cost,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+type clockRow struct {
+	DOW      int     `json:"dow"`  // 0=Sun .. 6=Sat
+	Hour     int     `json:"hour"` // 0..23, in the requested timezone
+	Tokens   int64   `json:"tokens"`
+	Messages int64   `json:"messages"`
+	Cost     float64 `json:"cost_usd"`
+}
+
+// /clock?user=&from=&to=&tz=America/New_York
+//
+// Per-(weekday, hour) usage distribution read from usage_detail and bucketed in
+// the caller's timezone (tz, default UTC). Open like /summary — no auth within
+// the trusted network. Cost is priced per detail row server-side.
+func (a *API) handleClock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	rows, err := a.Store.ClockAggregate(r.Context(), q.Get("user"), q.Get("tz"),
+		parseTime(q.Get("from")), parseTime(q.Get("to")))
+	if err != nil {
+		log.Printf("clock aggregate error: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]clockRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, clockRow{
+			DOW:      row.DOW,
+			Hour:     row.Hour,
+			Tokens:   row.Tokens,
+			Messages: row.Messages,
+			Cost:     row.Cost,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

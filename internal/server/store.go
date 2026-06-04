@@ -598,3 +598,90 @@ ORDER BY d.day DESC, d.user_id, d.tool, d.model
 	}
 	return out, nil
 }
+
+type ClockRow struct {
+	DOW      int     // 0=Sunday .. 6=Saturday (Postgres EXTRACT(DOW))
+	Hour     int     // 0..23 in the requested timezone
+	Tokens   int64   // input + output + cache_creation + cache_read
+	Messages int64   // one usage_detail row == one assistant message
+	Cost     float64 // priced per detail row at its own ts, then summed
+}
+
+// ClockAggregate returns per-(weekday, hour) token/message totals with
+// time-aware cost, bucketed in the given IANA timezone (e.g. "America/New_York";
+// empty -> "UTC"). Unlike Aggregate this reads usage_detail directly because
+// usage_daily has no hour grain — the ts range filter is index-supported
+// (idx_detail_ts / idx_detail_user_ts) and the output is at most 7×24=168 rows.
+// To stay fast it pre-aggregates detail into (local-date, hour, model) groups
+// FIRST, then runs the time-aware model_prices lookup once per group (keyed on
+// the local calendar date, same logic as Aggregate) — NOT once per detail row,
+// which is what made the naive version slow. Models absent from model_prices
+// contribute 0 cost (tokens still count); pricesync seeds defaults so that's rare.
+func (s *Store) ClockAggregate(ctx context.Context, user, tz string, from, to time.Time) ([]ClockRow, error) {
+	if tz == "" {
+		tz = "UTC"
+	}
+	q := `
+WITH agg AS (
+    SELECT (d.ts AT TIME ZONE $4)::date                 AS d_local,
+           EXTRACT(HOUR FROM d.ts AT TIME ZONE $4)::int AS hour,
+           d.model,
+           SUM(d.input_tokens)          AS in_t,
+           SUM(d.output_tokens)         AS out_t,
+           SUM(d.cache_creation_tokens) AS cc_t,
+           SUM(d.cache_read_tokens)     AS cr_t,
+           COUNT(*)                     AS msgs
+    FROM usage_detail d
+    WHERE ($1 = '' OR d.user_id = $1)
+      AND ($2::timestamptz IS NULL OR d.ts >= $2)
+      AND ($3::timestamptz IS NULL OR d.ts <  $3)
+    GROUP BY 1, 2, 3
+)
+SELECT EXTRACT(DOW FROM a.d_local)::int AS dow,
+       a.hour,
+       SUM(a.in_t + a.out_t + a.cc_t + a.cr_t)::bigint AS tokens,
+       SUM(a.msgs)::bigint                             AS messages,
+       COALESCE(SUM(
+           (a.in_t  * COALESCE(p.input_per_1m,          0)
+          + a.out_t * COALESCE(p.output_per_1m,         0)
+          + a.cc_t  * COALESCE(p.cache_creation_per_1m, 0)
+          + a.cr_t  * COALESCE(p.cache_read_per_1m,     0)) / 1000000.0), 0) AS cost
+FROM agg a
+LEFT JOIN LATERAL (
+    SELECT mp.input_per_1m, mp.output_per_1m,
+           mp.cache_creation_per_1m, mp.cache_read_per_1m
+    FROM model_prices mp
+    WHERE a.model LIKE mp.model_prefix || '%'
+      AND mp.valid_from <= (a.d_local::timestamptz + interval '1 day')
+      AND (mp.valid_to IS NULL OR mp.valid_to > a.d_local::timestamptz)
+    ORDER BY length(mp.model_prefix) DESC, mp.valid_from DESC
+    LIMIT 1
+) p ON TRUE
+GROUP BY 1, 2
+ORDER BY 1, 2
+`
+	var fromArg, toArg any
+	if !from.IsZero() {
+		fromArg = from.UTC()
+	}
+	if !to.IsZero() {
+		toArg = to.UTC()
+	}
+	rows, err := s.pool.Query(ctx, q, user, fromArg, toArg, tz)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ClockRow
+	for rows.Next() {
+		var r ClockRow
+		if err := rows.Scan(&r.DOW, &r.Hour, &r.Tokens, &r.Messages, &r.Cost); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return out, nil
+}

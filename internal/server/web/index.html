@@ -54,6 +54,7 @@
       <div class="meta-row"><span class="meta-k">messages</span><span class="meta-v" id="total-msgs">—</span></div>
     </div>
     <div class="hero-savings" id="hero-savings"></div>
+    <div class="hero-forecast" id="hero-forecast"></div>
   </section>
 
   <section class="card span-2 stagger" style="--idx:1">
@@ -65,6 +66,7 @@
       </div>
       <ul class="legend" id="legend"></ul>
     </header>
+    <div class="spike-alert" id="spike-alert" hidden></div>
     <div class="chart-wrap">
       <svg id="bars" preserveAspectRatio="none" aria-label="daily token cost"></svg>
       <div id="tooltip" class="tooltip" hidden></div>
@@ -72,7 +74,7 @@
     </div>
   </section>
 
-  <section class="card span-full stagger" style="--idx:2">
+  <section class="card span-2 stagger" style="--idx:2">
     <header class="card-head">
       <h2><em class="serif-i">Activity</em> <span class="dim">// daily token totals · last 53 weeks</span></h2>
       <div class="heatmap-scale" aria-label="intensity scale">
@@ -88,6 +90,16 @@
     <div class="heatmap-wrap">
       <svg id="heatmap" preserveAspectRatio="xMinYMid meet" aria-label="daily token usage heatmap"></svg>
       <div id="heatmap-tooltip" class="tooltip" hidden></div>
+    </div>
+  </section>
+
+  <section class="card stagger" style="--idx:3">
+    <header class="card-head">
+      <h2 class="nowrap"><em class="serif-i">Rhythm</em> <span class="dim">// hour × weekday · local</span></h2>
+    </header>
+    <div class="heatmap-wrap clock-wrap">
+      <svg id="clock-heatmap" preserveAspectRatio="xMinYMid meet" aria-label="hour-by-weekday usage heatmap"></svg>
+      <div id="clock-tooltip" class="tooltip" hidden></div>
     </div>
   </section>
 
