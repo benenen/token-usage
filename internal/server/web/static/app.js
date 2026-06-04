@@ -79,6 +79,7 @@
     rangeDays: 30,
     user: "",
     rows: [],
+    clock: [],          // /clock rows: per-(dow,hour) totals in the browser's tz
     users: [],          // registered users (from /users); may include zero-data users
     prices: null,       // /prices history, lazily loaded on first modal open
     sortKey: "day",
@@ -86,6 +87,10 @@
     filter: "",
     metric: "cost",     // "cost" (USD) | "tokens" — Daily bar chart axis
   };
+
+  // Trend overlays: trailing window for the moving-average line, and the
+  // factor a day's metric must exceed (vs its trailing avg) to trip the alert.
+  const MA_WINDOW = 7, SPIKE_FACTOR = 2;
 
   // ---- DOM refs -----------------------------------------------------------
   const $ = (id) => document.getElementById(id);
@@ -103,7 +108,9 @@
     totalTok:     $("total-tok"),
     totalMsgs:    $("total-msgs"),
     heroSavings:  $("hero-savings"),
+    heroForecast: $("hero-forecast"),
     legend:       $("legend"),
+    spikeBanner:  $("spike-alert"),
     svg:          $("bars"),
     yaxis:        $("yaxis"),
     tooltip:      $("tooltip"),
@@ -114,6 +121,9 @@
     heatmap:      $("heatmap"),
     heatmapWrap:  document.querySelector(".heatmap-wrap"),
     heatmapTip:   $("heatmap-tooltip"),
+    clockHeatmap: $("clock-heatmap"),
+    clockWrap:    document.querySelector(".clock-wrap"),
+    clockTip:     $("clock-tooltip"),
     priceModal:   $("price-modal"),
     priceTitle:   $("price-title"),
     priceLegend:  $("price-legend"),
@@ -158,6 +168,15 @@
     }
     els.lastFetch.textContent = "synced @ " + new Date().toLocaleTimeString();
     render();
+    // /clock reads usage_detail (sub-day grain), so fetch it in the background
+    // and bucket by the browser's local timezone — "when do I code" only makes
+    // sense in wall-clock time. Re-renders the Rhythm card when it lands.
+    const clockParams = new URLSearchParams(params);
+    clockParams.set("tz", Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+    fetch("/clock?" + clockParams.toString(), { headers: { accept: "application/json" }})
+      .then(r => r.ok ? r.json() : [])
+      .then(c => { state.clock = c || []; renderClock(); })
+      .catch(e => console.warn("/clock fetch failed (non-fatal)", e));
     // Fire /users in the background — it can be 20s+ during heavy /ingest
     // (pool saturation), and the dashboard's main content doesn't need it.
     // When it arrives, just refresh the USER dropdown.
@@ -214,6 +233,7 @@
 
     const totals = aggregateTotals(state.rows);
     renderHero(totals);
+    renderForecast(state.rows);
 
     const byDay = aggregateByDay(state.rows);
     const byModel = aggregateBy(state.rows, "model");
@@ -222,7 +242,9 @@
 
     renderLegend(byModel);
     renderBars(byDay, byModel);
+    renderSpike(densify(byDay, state.rangeDays));
     renderHeatmap(byDay);
+    renderClock();
     renderRank(els.modelRank, byModel, "model");
     renderRank(els.userRank, byUser, "none");
     renderRank(els.toolRank, byTool, "tool");
@@ -238,7 +260,10 @@
     clear(els.legend); clear(els.svg); clear(els.yaxis);
     clear(els.modelRank); clear(els.userRank); clear(els.toolRank); clear(els.ledgerBody);
     renderHeatmap([]);
+    clear(els.clockHeatmap);
     els.heroSavings.textContent = "";
+    clear(els.heroForecast);
+    els.spikeBanner.hidden = true;
     els.emptyEndpoint.textContent = `${location.protocol}//${location.host}/ingest`;
   }
 
@@ -367,6 +392,11 @@
     if (sorted.length > 6) {
       els.legend.appendChild(el("li", { class: "dim" }, `+ ${sorted.length - 6} more`));
     }
+    // Marker for the trend overlay drawn by renderBars().
+    els.legend.appendChild(el("li", { class: "ma-key" }, [
+      el("span", { class: "swatch ma" }),
+      el("span", null, `${MA_WINDOW}-day avg`),
+    ]));
   }
 
   // ---- bars (SVG stacked) -------------------------------------------------
@@ -441,6 +471,24 @@
         els.svg.appendChild(t);
       }
     });
+
+    // 7-day trailing moving-average overlay — a dashed reference line so the
+    // eye can separate trend from day-to-day noise. Uses metricTotal so it
+    // follows the cost/tokens toggle, and the same niceMax scale as the bars
+    // (an average never exceeds the max daily total, so it always fits).
+    let acc = 0;
+    const maPts = [];
+    dense.forEach((day, idx) => {
+      acc += metricTotal(day);
+      if (idx >= MA_WINDOW) acc -= metricTotal(dense[idx - MA_WINDOW]);
+      const avg = acc / Math.min(idx + 1, MA_WINDOW);
+      const cx = padL + idx * (innerW / dense.length) + (innerW / dense.length) / 2;
+      const cy = padT + innerH - (avg / niceMax) * innerH;
+      maPts.push(`${cx.toFixed(2)},${cy.toFixed(2)}`);
+    });
+    if (maPts.length > 1) {
+      els.svg.appendChild(svg("polyline", { points: maPts.join(" "), class: "ma-line" }));
+    }
   }
 
   function densify(byDay, rangeDays) {
@@ -456,6 +504,82 @@
       out.push(map.get(key) || { day: key, byModel: {}, totalCost: 0, totalTokens: 0 });
     }
     return out;
+  }
+
+  // ---- trend: month-to-date projection + spike alert ----------------------
+  // Month-to-date spend plus a linear run-rate projection for the current UTC
+  // month. The rate uses COMPLETE days only (excludes today's partial bucket)
+  // so the forecast isn't dragged down by a half-finished day. Only meaningful
+  // when the loaded window reaches back to the 1st — renderForecast() guards.
+  function mtdProjection(rows) {
+    const now = new Date();
+    const y = now.getUTCFullYear(), mo = now.getUTCMonth(), dom = now.getUTCDate();
+    const monthStart = Date.UTC(y, mo, 1);
+    const todayStart = Date.UTC(y, mo, dom);
+    const daysInMonth = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    let mtd = 0, complete = 0;
+    for (const r of rows) {
+      const t = Date.parse(r.day + "T00:00:00Z");
+      if (isNaN(t) || t < monthStart) continue;
+      const c = r.cost_usd || 0;
+      mtd += c;
+      if (t < todayStart) complete += c;
+    }
+    const completeDays = dom - 1;
+    const rate = completeDays > 0 ? complete / completeDays : mtd;
+    return { mtd, projected: rate * daysInMonth, completeDays, daysInMonth };
+  }
+
+  function renderForecast(rows) {
+    clear(els.heroForecast);
+    // The projection is month-scoped, so it only holds if the loaded window
+    // covers the whole month-to-date; otherwise mtd would be a partial sum.
+    const dom = new Date().getUTCDate();
+    const coversMonth = state.rangeDays === 0 || state.rangeDays >= dom;
+    if (!coversMonth) {
+      els.heroForecast.appendChild(
+        el("span", { class: "dim" }, `select ≥${dom}d range for this month's forecast`));
+      return;
+    }
+    const f = mtdProjection(rows);
+    els.heroForecast.appendChild(el("span", { class: "fc-k" }, "month-to-date"));
+    els.heroForecast.appendChild(el("span", { class: "fc-v" }, "$" + f.mtd.toFixed(2)));
+    els.heroForecast.appendChild(el("span", { class: "fc-arrow" }, "→"));
+    els.heroForecast.appendChild(el("span", { class: "fc-k" }, "projected"));
+    els.heroForecast.appendChild(el("strong", { class: "fc-proj" }, "$" + f.projected.toFixed(2)));
+    els.heroForecast.appendChild(
+      el("span", { class: "dim fc-note" }, `· ${f.completeDays}/${f.daysInMonth}d`));
+  }
+
+  // Most-recent COMPLETE day whose metric exceeds `factor`× its trailing 7-day
+  // average. Walks newest→oldest and needs ≥3 prior days to judge (avoids a
+  // 1-day-vs-1-day false alarm near a range's left edge). `dense` must be the
+  // densify() output so gaps count as zero rather than being skipped.
+  function findSpike(dense, factor) {
+    for (let i = dense.length - 2; i >= 0; i--) {   // -2 => skip today (partial)
+      let sum = 0, cnt = 0;
+      for (let j = Math.max(0, i - 7); j < i; j++) { sum += metricTotal(dense[j]); cnt++; }
+      if (cnt < 3) break;
+      const base = sum / cnt, v = metricTotal(dense[i]);
+      if (base > 0 && v / base >= factor) return { day: dense[i].day, value: v, base, ratio: v / base };
+    }
+    return null;
+  }
+
+  function renderSpike(dense) {
+    clear(els.spikeBanner);
+    const s = findSpike(dense, SPIKE_FACTOR);
+    if (!s) { els.spikeBanner.hidden = true; return; }
+    els.spikeBanner.hidden = false;
+    els.spikeBanner.appendChild(el("span", { class: "spike-icon" }, "▲"));
+    els.spikeBanner.appendChild(el("span", { class: "spike-text" }, [
+      el("strong", null, s.day),
+      ` ${state.metric === "tokens" ? "usage" : "spend"} `,
+      el("strong", null, fmtMetric(s.value)),
+      " is ",
+      el("strong", null, `${s.ratio.toFixed(1)}×`),
+      ` the prior ${MA_WINDOW}-day average (${fmtMetric(s.base)})`,
+    ]));
   }
 
   // ---- heatmap (GitHub-style year activity) -------------------------------
@@ -581,6 +705,98 @@
     t.style.top  = top + "px";
   }
   function hideHeatmapTip() { els.heatmapTip.hidden = true; }
+
+  // ---- rhythm heatmap (hour × weekday, local time) ------------------------
+  // 7 rows (Sun..Sat, matching EXTRACT(DOW)) × 24 hour columns. Reuses the
+  // calendar heatmap's 5-level colour scale and tooltip positioning; only the
+  // grid geometry and data source (/clock, already in the browser's tz) differ.
+  const CLOCK_DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  function renderClock() {
+    const svgEl = els.clockHeatmap;
+    if (!svgEl) return;
+    clear(svgEl);
+
+    const cell = 14, gap = 3, step = cell + gap;
+    const padL = 34, padT = 18, padR = 6, padB = 6;
+    const W = padL + 24 * step + padR;
+    const H = padT + 7 * step + padB;
+    svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+    const pick = (r) => state.metric === "tokens" ? (r.tokens || 0) : (r.cost_usd || 0);
+    const grid = new Map();                 // dow*24 + hour -> row
+    for (const r of state.clock) grid.set(r.dow * 24 + r.hour, r);
+
+    // Same 95th-percentile anchor as the calendar heatmap so one busy hour
+    // doesn't flatten everything else into level 1.
+    const vals = state.clock.map(pick).filter(v => v > 0).sort((a, b) => a - b);
+    const max = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.95))] : 1;
+
+    // hour labels every 6h along the top
+    for (let h = 0; h < 24; h += 6) {
+      const t = svg("text", { x: padL + h * step, y: padT - 6, class: "heatmap-month" });
+      t.textContent = String(h).padStart(2, "0");
+      svgEl.appendChild(t);
+    }
+    // weekday labels down the left
+    for (let row = 0; row < 7; row++) {
+      const t = svg("text", {
+        x: padL - 6, y: padT + row * step + cell - 3,
+        "text-anchor": "end", class: "heatmap-day",
+      });
+      t.textContent = CLOCK_DAY_NAMES[row];
+      svgEl.appendChild(t);
+    }
+    // cells
+    for (let row = 0; row < 7; row++) {
+      for (let h = 0; h < 24; h++) {
+        const r = grid.get(row * 24 + h);
+        const v = r ? pick(r) : 0;
+        const rect = svg("rect", {
+          x: padL + h * step, y: padT + row * step,
+          width: cell, height: cell, rx: 2, ry: 2,
+          fill: HEATMAP_COLORS[heatmapLevel(v, max)],
+          class: "heatmap-cell",
+        });
+        const cap = r || { tokens: 0, cost_usd: 0, messages: 0 };
+        rect.addEventListener("mouseenter", (e) => showClockTip(e, row, h, cap));
+        rect.addEventListener("mousemove", moveClockTip);
+        rect.addEventListener("mouseleave", hideClockTip);
+        svgEl.appendChild(rect);
+      }
+    }
+  }
+
+  function showClockTip(e, dow, hour, r) {
+    const t = els.clockTip;
+    clear(t);
+    t.appendChild(el("div", { class: "tt-day" }, `${CLOCK_DAY_NAMES[dow]} ${String(hour).padStart(2, "0")}:00`));
+    t.appendChild(el("div", { class: "tt-total" }, [
+      el("span", null, state.metric === "tokens" ? "TOKENS" : "USD"),
+      el("span", null, state.metric === "tokens"
+        ? (r.tokens > 0 ? fmtTokens(r.tokens) : "—")
+        : (r.cost_usd > 0 ? "$" + r.cost_usd.toFixed(2) : "—")),
+    ]));
+    t.appendChild(el("div", { class: "tt-total" }, [
+      el("span", null, "MSGS"),
+      el("span", null, r.messages > 0 ? fmtInt(r.messages) : "—"),
+    ]));
+    t.hidden = false;
+    moveClockTip(e);
+  }
+  function moveClockTip(e) {
+    const t = els.clockTip;
+    const wrap = els.clockWrap.getBoundingClientRect();
+    const tw = t.offsetWidth, th = t.offsetHeight;
+    const cx = e.clientX - wrap.left, cy = e.clientY - wrap.top;
+    let left = cx - tw / 2;
+    let top  = cy - th - 10;
+    left = Math.max(4, Math.min(left, wrap.width - tw - 4));
+    if (top < 4) top = cy + 14;
+    t.style.left = left + "px";
+    t.style.top  = top + "px";
+  }
+  function hideClockTip() { els.clockTip.hidden = true; }
 
   function niceCeil(v) {
     if (v <= 0) return 1;

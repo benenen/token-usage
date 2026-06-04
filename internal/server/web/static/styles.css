@@ -262,6 +262,7 @@ body::before {
 }
 .dim { color: var(--text-dim); }
 .small { font-size: 11px; }
+.nowrap { white-space: nowrap; }
 
 .card-eyebrow {
   display: flex; justify-content: space-between;
@@ -344,6 +345,52 @@ body::before {
   min-height: 1.6em;
 }
 .hero-savings strong { color: var(--cool); font-weight: 600; }
+
+.hero-forecast {
+  margin-top: 10px;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.hero-forecast .fc-k {
+  color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px;
+}
+.hero-forecast .fc-v { color: var(--text); font-weight: 500; }
+.hero-forecast .fc-arrow { color: var(--text-dimmer); }
+.hero-forecast .fc-proj { color: var(--hot); font-weight: 600; }
+.hero-forecast .fc-note { font-size: 11px; }
+
+/* -------- trend overlays (MA line + spike alert) ---------- */
+.ma-line {
+  fill: none;
+  stroke: var(--bone);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  stroke-linejoin: round; stroke-linecap: round;
+  opacity: 0.8;
+  pointer-events: none;
+}
+.legend .swatch.ma {
+  width: 14px; height: 0; border-radius: 0;
+  background: none;
+  border-top: 1.5px dashed var(--bone);
+  align-self: center;
+}
+.spike-alert {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  background: rgba(255, 92, 26, 0.07);
+  border: 1px solid var(--line-hot);
+  border-left: 2px solid var(--hot);
+  border-radius: 3px;
+}
+.spike-alert[hidden] { display: none; }
+.spike-alert .spike-icon { color: var(--hot); }
+.spike-alert strong { color: var(--text); font-weight: 600; }
 
 /* -------- legend ---------- */
 .legend {
@@ -539,6 +586,15 @@ body::before {
   min-width: 720px;
   height: auto;
 }
+#clock-heatmap {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  height: auto;
+}
+/* The 24-col grid scales to fit via preserveAspectRatio, so it never needs
+   to scroll horizontally (unlike the 53-week calendar #heatmap). */
+.clock-wrap { overflow-x: hidden; }
 .heatmap-cell {
   transition: filter .12s ease, stroke-opacity .12s ease;
   cursor: crosshair;
