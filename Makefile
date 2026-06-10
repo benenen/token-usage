@@ -113,3 +113,6 @@ docker-run: docker
 	docker run --rm -p 8080:8080 \
 	    -e TOKENUSAGE_DSN \
 	    $(IMAGE)
+
+watch: server
+	TOKENUSAGE_DSN="postgres://tokenuser:tokenpass@localhost:5432/tokenusage?sslmode=disable" $(BIN)/token-usage-server

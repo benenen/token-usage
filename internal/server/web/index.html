@@ -69,7 +69,6 @@
     <div class="spike-alert" id="spike-alert" hidden></div>
     <div class="chart-wrap">
       <svg id="bars" preserveAspectRatio="none" aria-label="daily token cost"></svg>
-      <div id="tooltip" class="tooltip" hidden></div>
       <div class="chart-yaxis" id="yaxis"></div>
     </div>
   </section>
@@ -89,7 +88,6 @@
     </header>
     <div class="heatmap-wrap">
       <svg id="heatmap" preserveAspectRatio="xMinYMid meet" aria-label="daily token usage heatmap"></svg>
-      <div id="heatmap-tooltip" class="tooltip" hidden></div>
     </div>
   </section>
 
@@ -99,7 +97,6 @@
     </header>
     <div class="heatmap-wrap clock-wrap">
       <svg id="clock-heatmap" preserveAspectRatio="xMinYMid meet" aria-label="hour-by-weekday usage heatmap"></svg>
-      <div id="clock-tooltip" class="tooltip" hidden></div>
     </div>
   </section>
 
@@ -188,6 +185,9 @@ token-usage-watcher \
   <span class="dim" id="lastfetch">—</span>
 </footer>
 
+<div id="tooltip" class="tooltip" hidden></div>
+<div id="heatmap-tooltip" class="tooltip" hidden></div>
+<div id="clock-tooltip" class="tooltip" hidden></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

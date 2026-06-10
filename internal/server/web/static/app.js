@@ -694,13 +694,15 @@
   }
   function moveHeatmapTip(e) {
     const t = els.heatmapTip;
-    const wrap = els.heatmapWrap.getBoundingClientRect();
     const tw = t.offsetWidth, th = t.offsetHeight;
-    const cx = e.clientX - wrap.left, cy = e.clientY - wrap.top;
-    let left = cx - tw / 2;
-    let top  = cy - th - 10;
-    left = Math.max(4, Math.min(left, wrap.width - tw - 4));
-    if (top < 4) top = cy + 14;
+    let left = e.clientX - tw / 2;
+    let top  = e.clientY - th - 10;
+    const pad = 8;
+    left = Math.max(pad, Math.min(left, window.innerWidth - tw - pad));
+    if (top < pad) {
+      top = e.clientY + 14;
+      if (top + th > window.innerHeight - pad) top = window.innerHeight - th - pad;
+    }
     t.style.left = left + "px";
     t.style.top  = top + "px";
   }
@@ -786,13 +788,15 @@
   }
   function moveClockTip(e) {
     const t = els.clockTip;
-    const wrap = els.clockWrap.getBoundingClientRect();
     const tw = t.offsetWidth, th = t.offsetHeight;
-    const cx = e.clientX - wrap.left, cy = e.clientY - wrap.top;
-    let left = cx - tw / 2;
-    let top  = cy - th - 10;
-    left = Math.max(4, Math.min(left, wrap.width - tw - 4));
-    if (top < 4) top = cy + 14;
+    let left = e.clientX - tw / 2;
+    let top  = e.clientY - th - 10;
+    const pad = 8;
+    left = Math.max(pad, Math.min(left, window.innerWidth - tw - pad));
+    if (top < pad) {
+      top = e.clientY + 14;
+      if (top + th > window.innerHeight - pad) top = window.innerHeight - th - pad;
+    }
     t.style.left = left + "px";
     t.style.top  = top + "px";
   }
@@ -845,19 +849,17 @@
   }
   function moveTooltip(e) {
     const t = els.tooltip;
-    const wrap = els.chartWrap.getBoundingClientRect();
-    // Center horizontally on cursor; place above cursor with a small gap
-    // so the bar being inspected isn't covered.
     const tw = t.offsetWidth;
     const th = t.offsetHeight;
-    const cursorX = e.clientX - wrap.left;
-    const cursorY = e.clientY - wrap.top;
-    let left = cursorX - tw / 2;
-    let top  = cursorY - th - 10;
-    // Clamp horizontally so the tooltip stays inside the chart.
-    left = Math.max(4, Math.min(left, wrap.width - tw - 4));
-    // If above cursor would clip the top of the chart, fall through to below.
-    if (top < 4) top = cursorY + 14;
+    let left = e.clientX - tw / 2;
+    let top  = e.clientY - th - 10;
+    // Clamp to viewport so the tooltip is never clipped.
+    const pad = 8;
+    left = Math.max(pad, Math.min(left, window.innerWidth - tw - pad));
+    if (top < pad) {
+      top = e.clientY + 14;
+      if (top + th > window.innerHeight - pad) top = window.innerHeight - th - pad;
+    }
     t.style.left = left + "px";
     t.style.top  = top + "px";
   }

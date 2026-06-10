@@ -469,7 +469,7 @@ body::before {
 }
 
 .tooltip {
-  position: absolute;
+  position: fixed;
   background: var(--ink-deep);
   border: 1px solid var(--line);
   padding: 10px 12px;
