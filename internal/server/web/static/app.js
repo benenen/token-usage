@@ -129,6 +129,11 @@
     priceLegend:  $("price-legend"),
     priceChart:   $("price-chart"),
     priceClose:   $("price-close"),
+    statsBtn:     $("stats-btn"),
+    statsModal:   $("stats-modal"),
+    statsLegend:  $("stats-legend"),
+    statsChart:   $("stats-chart"),
+    statsClose:   $("stats-close"),
     ledgerBody:   document.querySelector("#ledger tbody"),
     ledgerHead:   document.querySelectorAll("#ledger thead th"),
     ledgerFilter: $("ledger-filter"),
@@ -1146,6 +1151,142 @@
     if (!t) return;
     const m = t.getAttribute("data-model");
     if (m) openPriceModal(m);
+  });
+
+  // ---- stats modal (calendar-month bar chart) -----------------------------
+  // Single accent for the monthly bars — reuse the "cost" signal colour.
+  const STATS_COLOR = "#ff5c1a";
+  const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun",
+                      "Jul","Aug","Sep","Oct","Nov","Dec"];
+  function monthLabel(key) {                 // "2026-06" -> "Jun 2026"
+    const [y, m] = key.split("-");
+    return MONTH_ABBR[Number(m) - 1] + " " + y;
+  }
+
+  // Buckets the rows by natural (calendar) month. Independent of the range
+  // picker — the modal always shows the full history for the current user.
+  function aggregateByMonth(rows) {
+    const m = new Map();
+    for (const r of rows) {
+      const key = (r.day || "").slice(0, 7); // YYYY-MM
+      if (!key) continue;
+      if (!m.has(key)) m.set(key, { month: key, cost: 0, tokens: 0, msgs: 0 });
+      const s = m.get(key);
+      s.cost   += r.cost_usd || 0;
+      s.tokens += (r.input_tokens || 0) + (r.output_tokens || 0)
+                + (r.cache_creation_tokens || 0) + (r.cache_read_tokens || 0);
+      s.msgs   += r.messages || 0;
+    }
+    return Array.from(m.values()).sort((a, b) => a.month.localeCompare(b.month));
+  }
+
+  // All-time /summary for the current user filter (no `from` => full history).
+  async function fetchAllTimeRows() {
+    const params = new URLSearchParams();
+    if (state.user) params.set("user", state.user);
+    const url = "/summary" + (params.toString() ? "?" + params.toString() : "");
+    const res = await fetch(url, { headers: { accept: "application/json" } });
+    if (!res.ok) throw new Error("/summary HTTP " + res.status);
+    return (await res.json()) || [];
+  }
+
+  async function openStatsModal() {
+    els.statsModal.hidden = false;
+    els.statsModal.setAttribute("aria-hidden", "false");
+    let rows = [];
+    try {
+      rows = await fetchAllTimeRows();
+    } catch (e) {
+      console.error("stats fetch failed", e);
+    }
+    renderStats(aggregateByMonth(rows));
+  }
+
+  function closeStatsModal() {
+    els.statsModal.hidden = true;
+    els.statsModal.setAttribute("aria-hidden", "true");
+  }
+
+  function renderStats(months) {
+    // legend doubles as a totals readout
+    clear(els.statsLegend);
+    const totalCost = months.reduce((s, m) => s + m.cost, 0);
+    const totalTok  = months.reduce((s, m) => s + m.tokens, 0);
+    els.statsLegend.appendChild(el("li", null, [
+      el("span", { class: "swatch", style: `background:${STATS_COLOR}` }),
+      el("span", null, "USD / calendar month"),
+    ]));
+    els.statsLegend.appendChild(el("li", { class: "dim" },
+      `${months.length} mo · $${totalCost.toFixed(2)} · ${fmtTokens(totalTok)} tok`));
+
+    const svgEl = els.statsChart;
+    clear(svgEl);
+    if (!months.length) return;
+
+    const W = svgEl.clientWidth || 700;
+    const H = svgEl.clientHeight || 240;
+    const padL = 56, padR = 14, padT = 18, padB = 30;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+    const maxV = Math.max(...months.map(m => m.cost), 0.01);
+    const niceMax = niceCeil(maxV);
+    const yOf = v => padT + innerH - (v / niceMax) * innerH;
+
+    // y gridlines + $ ticks
+    const steps = 5;
+    for (let i = 0; i <= steps; i++) {
+      const v = niceMax * (i / steps);
+      const y = padT + innerH - (i / steps) * innerH;
+      svgEl.appendChild(svg("line", {
+        x1: padL, x2: W - padR, y1: y, y2: y,
+        stroke: "#232a36", "stroke-dasharray": "3,3",
+      }));
+      const t = svg("text", { x: padL - 8, y: y + 3, "text-anchor": "end", class: "bar-tick" });
+      t.textContent = formatPriceTick(v);
+      svgEl.appendChild(t);
+    }
+
+    // bars — one per calendar month
+    const n = months.length;
+    const slot = innerW / n;
+    const bw = Math.min(slot * 0.62, 46);
+    const labelEvery = Math.ceil(n / 12);   // thin x-labels when many months
+    months.forEach((mo, i) => {
+      const x = padL + slot * i + (slot - bw) / 2;
+      const y = yOf(mo.cost);
+      const h = Math.max(padT + innerH - y, 0);
+      const rect = svg("rect", { x, y, width: bw, height: h, fill: STATS_COLOR, rx: 1 });
+      const title = svg("title", {});
+      title.textContent = `${mo.month}  $${mo.cost.toFixed(2)}  ${fmtTokens(mo.tokens)} tok`;
+      rect.appendChild(title);
+      svgEl.appendChild(rect);
+
+      if (mo.cost > 0) {
+        const vt = svg("text", {
+          x: x + bw / 2, y: y - 5, "text-anchor": "middle", class: "bar-tick",
+        });
+        vt.textContent = "$" + (mo.cost >= 100 ? mo.cost.toFixed(0) : mo.cost.toFixed(1));
+        svgEl.appendChild(vt);
+      }
+      if (i % labelEvery === 0 || i === n - 1) {
+        const xt = svg("text", {
+          x: x + bw / 2, y: H - 10, "text-anchor": "middle", class: "bar-tick",
+        });
+        xt.textContent = monthLabel(mo.month);
+        svgEl.appendChild(xt);
+      }
+    });
+  }
+
+  els.statsBtn.addEventListener("click", openStatsModal);
+  els.statsClose.addEventListener("click", closeStatsModal);
+  els.statsModal.addEventListener("click", (e) => {
+    if (e.target.classList.contains("modal-backdrop")) closeStatsModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.statsModal.hidden) closeStatsModal();
   });
 
   // ---- boot ---------------------------------------------------------------

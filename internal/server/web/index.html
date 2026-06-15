@@ -31,6 +31,7 @@
       <span class="up-label">USER</span>
       <select id="user-select"><option value="">all</option></select>
     </label>
+    <button id="stats-btn" class="stats-btn" type="button">STATS</button>
     <div class="live-clock" id="clock"><span class="cur">▍</span>&nbsp;—&nbsp;</div>
   </nav>
 </header>
@@ -175,6 +176,20 @@ token-usage-watcher \
     <ul class="legend price-legend" id="price-legend"></ul>
     <div class="price-chart-wrap">
       <svg id="price-chart" preserveAspectRatio="none" aria-label="price history"></svg>
+    </div>
+  </div>
+</div>
+
+<div id="stats-modal" class="modal" hidden aria-hidden="true">
+  <div class="modal-backdrop"></div>
+  <div class="modal-card" role="dialog" aria-labelledby="stats-title">
+    <header class="modal-head">
+      <h2 id="stats-title">Monthly</h2>
+      <button id="stats-close" class="modal-close" aria-label="close">×</button>
+    </header>
+    <ul class="legend price-legend" id="stats-legend"></ul>
+    <div class="price-chart-wrap">
+      <svg id="stats-chart" preserveAspectRatio="none" aria-label="usage by calendar month"></svg>
     </div>
   </div>
 </div>
