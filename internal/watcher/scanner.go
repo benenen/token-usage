@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"fmt"
 	"io/fs"
 	"log"
 	"maps"
@@ -58,11 +59,19 @@ func (s *Scanner) Scan() (parsers.ScanResult, map[string]FileState, error) {
 			pending := make(map[string]FileState)
 			var acc parsers.ScanResult
 
+			// A missing root must surface as a per-tick scan error — the
+			// WalkDir callback below skips walk errors, so without this
+			// stat a bad root logs a healthy-looking "0/0" forever.
+			info, err := os.Stat(src.Root)
+			if err != nil {
+				results[i].err = fmt.Errorf("source root (%s): %w", src.Tool, err)
+				return
+			}
 			// Source.Root may be a single file (e.g. opencode's SQLite db)
 			// rather than a directory of *.jsonl. In that case skip WalkDir
 			// and hand the parser the file path directly — checkpoint keys
 			// the same way (one entry per absolute path).
-			if info, err := os.Stat(src.Root); err == nil && !info.IsDir() {
+			if !info.IsDir() {
 				prev, _ := s.Checkpoint.Get(src.Root)
 				r, state, perr := parser.Scan(src.Root, src.Tool, prev, s.BackfillCutoff, now)
 				if perr != nil {
@@ -76,7 +85,7 @@ func (s *Scanner) Scan() (parsers.ScanResult, map[string]FileState, error) {
 				return
 			}
 
-			err := filepath.WalkDir(src.Root, func(path string, d fs.DirEntry, werr error) error {
+			err = filepath.WalkDir(src.Root, func(path string, d fs.DirEntry, werr error) error {
 				if werr != nil {
 					return nil // skip unreadable subtrees
 				}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -16,7 +17,15 @@ func main() {
 }
 
 func newRootCmd() *cobra.Command {
-	home, _ := os.UserHomeDir()
+	// os.UserHomeDir only reads $HOME, which is absent under init-started
+	// supervisord — an empty home would collapse stateDir and defaultRoot
+	// into cwd-relative paths. Fall back to the passwd entry.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		if u, uerr := user.Current(); uerr == nil {
+			home = u.HomeDir
+		}
+	}
 	stateDir := filepath.Join(home, ".token-usage-watcher")
 	defaultRoot := filepath.Join(home, ".claude", "projects")
 

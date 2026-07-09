@@ -153,7 +153,13 @@ func InstallSupervisor(self, apiKey, endpoint string, extra []string) error {
 	if err := os.MkdirAll(envDir, 0o700); err != nil {
 		return err
 	}
-	envContent := "TOKENUSAGE_API_KEY=" + apiKey + "\nTOKENUSAGE_ENDPOINT=" + endpoint + "\n"
+	// Pin HOME: supervisord started by init carries no HOME, and without
+	// it the watcher's default paths and source auto-detect collapse to
+	// cwd-relative and scan nothing. The program conf below runs the
+	// service as user=root, so root's home is the correct value.
+	envContent := "TOKENUSAGE_API_KEY=" + apiKey +
+		"\nTOKENUSAGE_ENDPOINT=" + endpoint +
+		"\nHOME=/root\n"
 	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
 		return err
 	}
