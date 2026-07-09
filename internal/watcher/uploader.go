@@ -30,10 +30,12 @@ type Uploader struct {
 // (otherwise "spooled" is opaque — was it DNS? a 5xx? a timeout?).
 // On a 2xx the other fields are zero and SpoolReason is nil.
 type SendResult struct {
-	Accepted    int
-	Duplicates  int
-	Spooled     bool
-	SpoolReason error
+	Accepted        int
+	Duplicates      int
+	EditsAccepted   int
+	EditsDuplicates int
+	Spooled         bool
+	SpoolReason     error
 }
 
 // Send POSTs recs as one batch. If the POST fails AND BufferDir is set,
@@ -44,15 +46,31 @@ func (u *Uploader) Send(ctx context.Context, recs []types.UsageRecord) (SendResu
 	if len(recs) == 0 {
 		return SendResult{}, nil
 	}
-	body, err := json.Marshal(types.IngestRequest{
-		MachineID: u.MachineID,
-		Records:   recs,
-	})
+	return u.sendRequest(ctx, types.IngestRequest{MachineID: u.MachineID, Records: recs}, false)
+}
+
+// SendEdits POSTs one batch of file-edit events. Deliberately a separate
+// request from Send: a pre-edits server (strict JSON decoder) rejects any
+// payload carrying an `edits` field, and bundling would take the usage
+// records down with it. Same durability contract as Send.
+func (u *Uploader) SendEdits(ctx context.Context, edits []types.EditRecord) (SendResult, error) {
+	if len(edits) == 0 {
+		return SendResult{}, nil
+	}
+	return u.sendRequest(ctx, types.IngestRequest{MachineID: u.MachineID, Edits: edits}, true)
+}
+
+func (u *Uploader) sendRequest(ctx context.Context, req types.IngestRequest, editsBatch bool) (SendResult, error) {
+	body, err := json.Marshal(req)
 	if err != nil {
 		return SendResult{}, err
 	}
 	res, err := u.post(ctx, body)
 	if err == nil {
+		if editsBatch {
+			// The server tallies edits in their own response counters.
+			res.Accepted, res.Duplicates = res.EditsAccepted, res.EditsDuplicates
+		}
 		return res, nil
 	}
 	if u.BufferDir == "" {
@@ -88,7 +106,12 @@ func (u *Uploader) post(ctx context.Context, body []byte) (SendResult, error) {
 	// 204-style no-content path); fall through to zero-valued ack rather
 	// than treat decode failure as a transport error.
 	_ = json.NewDecoder(resp.Body).Decode(&ack)
-	return SendResult{Accepted: ack.Accepted, Duplicates: ack.Duplicates}, nil
+	return SendResult{
+		Accepted:        ack.Accepted,
+		Duplicates:      ack.Duplicates,
+		EditsAccepted:   ack.EditsAccepted,
+		EditsDuplicates: ack.EditsDuplicates,
+	}, nil
 }
 
 func (u *Uploader) spool(body []byte) error {

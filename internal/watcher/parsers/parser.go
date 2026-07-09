@@ -23,13 +23,21 @@ type FileState struct {
 	Offset int64  `json:"offset"`
 }
 
-// Parser knows how to turn one transcript file into UsageRecords. The
+// ScanResult is everything one Scan pass extracted from a transcript
+// file: token-usage rows and file-edit events. Both come out of the same
+// read (same checkpoint), so a parser never has to be scanned twice.
+type ScanResult struct {
+	Usage []types.UsageRecord
+	Edits []types.EditRecord
+}
+
+// Parser knows how to turn one transcript file into a ScanResult. The
 // `tool` argument is the user-chosen label stamped on every emitted
 // record (it equals the Source.Tool from the watcher CLI; may differ
 // from this parser's canonical name when a user repurposes a parser
 // under a custom tag).
 type Parser interface {
-	Scan(path, tool string, prev FileState, backfillCutoff time.Duration, now time.Time) ([]types.UsageRecord, FileState, error)
+	Scan(path, tool string, prev FileState, backfillCutoff time.Duration, now time.Time) (ScanResult, FileState, error)
 }
 
 var registry = map[string]Parser{}

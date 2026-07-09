@@ -32,6 +32,41 @@
   };
   function colorForTool(t) { return TOOL_COLORS[t] || "#7a7466"; }
 
+  // Language palette — fixed swatches for the common tags emitted by the
+  // watcher's langFromPath; anything else cycles the fallback palette.
+  const LANG_COLORS = {
+    golang:     "#7ec7c2",
+    java:       "#e8c47e",
+    rust:       "#ff8a5a",
+    python:     "#7a9ec6",
+    typescript: "#5b8d8a",
+    javascript: "#d9c46e",
+    markdown:   "#94c67e",
+    sql:        "#c67e7e",
+    shell:      "#b89860",
+    c:          "#8fa3bf",
+    cpp:        "#6f87ad",
+    csharp:     "#9d84c9",
+    kotlin:     "#c98470",
+    swift:      "#e88f5a",
+    ruby:       "#c65f6e",
+    php:        "#8b7cc9",
+    html:       "#d97e5a",
+    css:        "#6ea3d9",
+    vue:        "#68b98a",
+    json:       "#a8a26e",
+    yaml:       "#7eb0a0",
+    other:      "#7a7466",
+  };
+  const langFallbackUsed = new Map();
+  function colorForLang(l) {
+    if (LANG_COLORS[l]) return LANG_COLORS[l];
+    if (!langFallbackUsed.has(l)) {
+      langFallbackUsed.set(l, FALLBACK_PALETTE[langFallbackUsed.size % FALLBACK_PALETTE.length]);
+    }
+    return langFallbackUsed.get(l);
+  }
+
   // ---- formatters ---------------------------------------------------------
   const fmtUSD = (n) => {
     if (!isFinite(n)) return "—";
@@ -80,6 +115,7 @@
     user: "",
     rows: [],
     clock: [],          // /clock rows: per-(dow,hour) totals in the browser's tz
+    langs: [],          // /langs rows: per-(day,user,tool,lang) edit stats
     users: [],          // registered users (from /users); may include zero-data users
     prices: null,       // /prices history, lazily loaded on first modal open
     sortKey: "day",
@@ -118,6 +154,11 @@
     modelRank:    $("model-rank"),
     userRank:     $("user-rank"),
     toolRank:     $("tool-rank"),
+    langRank:     $("lang-rank"),
+    langEmpty:    $("lang-empty"),
+    langDonut:    $("lang-donut"),
+    langLegend:   $("lang-legend"),
+    langTip:      $("lang-tooltip"),
     heatmap:      $("heatmap"),
     heatmapWrap:  document.querySelector(".heatmap-wrap"),
     heatmapTip:   $("heatmap-tooltip"),
@@ -182,6 +223,12 @@
       .then(r => r.ok ? r.json() : [])
       .then(c => { state.clock = c || []; renderClock(); })
       .catch(e => console.warn("/clock fetch failed (non-fatal)", e));
+    // /langs feeds the Code card; also non-fatal in the background (an
+    // older server without the endpoint just leaves the card empty).
+    fetch("/langs" + (params.toString() ? "?" + params.toString() : ""), { headers: { accept: "application/json" }})
+      .then(r => r.ok ? r.json() : [])
+      .then(l => { state.langs = l || []; renderLangs(); })
+      .catch(e => console.warn("/langs fetch failed (non-fatal)", e));
     // Fire /users in the background — it can be 20s+ during heavy /ingest
     // (pool saturation), and the dashboard's main content doesn't need it.
     // When it arrives, just refresh the USER dropdown.
@@ -898,6 +945,145 @@
       host.appendChild(li);
     });
   }
+
+  // ---- code / languages card ----------------------------------------------
+  // Aggregates /langs rows (per day×user×tool×lang) into one row per
+  // language, ranked by total lines touched. Value column shows +added
+  // in green and −removed in red; the bar scales on lines touched.
+  function renderLangs() {
+    const host = els.langRank;
+    clear(host);
+    const byLang = new Map();
+    for (const r of state.langs) {
+      if (!byLang.has(r.lang)) byLang.set(r.lang, { lang: r.lang, added: 0, removed: 0, edits: 0 });
+      const s = byLang.get(r.lang);
+      s.added   += r.lines_added   || 0;
+      s.removed += r.lines_removed || 0;
+      s.edits   += r.edits         || 0;
+    }
+    const list = [...byLang.values()].sort((a, b) => (b.added + b.removed) - (a.added + a.removed));
+    els.langEmpty.hidden = list.length > 0;
+    renderLangDonut(list);
+    const total = list.reduce((s, x) => s + x.added + x.removed, 0);
+    const max = list.length ? (list[0].added + list[0].removed) : 1;
+    // All languages render; the card caps its height and scrolls (CSS).
+    list.forEach((item, i) => {
+      const rel = max > 0 ? ((item.added + item.removed) / max * 100) : 0;
+      const share = total > 0 ? ((item.added + item.removed) / total * 100) : 0;
+      const li = el("li", null, [
+        el("span", { class: "rk-num" }, String(i + 1).padStart(2, "0")),
+        el("span", { class: "rk-name" }, [
+          el("span", { class: "swatch", style: `background:${colorForLang(item.lang)}` }),
+          document.createTextNode(item.lang),
+          el("span", { class: "rk-share" },
+            ` ${share >= 10 ? share.toFixed(0) : share.toFixed(1)}% · ${fmtInt(item.edits)} edit${item.edits === 1 ? "" : "s"}`),
+        ]),
+        el("span", { class: "rk-val" }, [
+          el("span", { class: "lines-add" }, "+" + fmtTokens(item.added)),
+          document.createTextNode(" "),
+          el("span", { class: "lines-del" }, "−" + fmtTokens(item.removed)),
+        ]),
+        el("span", { class: "rk-bar" }, el("i", { style: `width:${rel.toFixed(1)}%` })),
+      ]);
+      host.appendChild(li);
+    });
+  }
+
+  // renderLangDonut draws the language-share ring: one stroke-dasharray
+  // circle per language, sized by its share of total lines touched
+  // (added + removed), starting at 12 o'clock. Center readout shows the
+  // total; hovering a segment shows lang · share % · +added/−removed.
+  function renderLangDonut(list) {
+    const svgEl = els.langDonut;
+    clear(svgEl);
+    clear(els.langLegend);
+    const total = list.reduce((s, x) => s + x.added + x.removed, 0);
+    if (total <= 0) return;
+
+    // Legend mirrors the Daily card's format: swatch + name + share %.
+    // list arrives sorted by lines touched, so the top entries lead.
+    const LEGEND_MAX = 8;
+    list.slice(0, LEGEND_MAX).forEach(item => {
+      const pct = (item.added + item.removed) / total * 100;
+      els.langLegend.appendChild(el("li", null, [
+        el("span", { class: "swatch", style: `background:${colorForLang(item.lang)}` }),
+        el("span", null, item.lang),
+        el("span", { class: "pct" }, `${pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)}%`),
+      ]));
+    });
+    if (list.length > LEGEND_MAX) {
+      const restPct = list.slice(LEGEND_MAX).reduce((s, x) => s + x.added + x.removed, 0) / total * 100;
+      els.langLegend.appendChild(el("li", { class: "dim" },
+        `+ ${list.length - LEGEND_MAX} more · ${restPct >= 10 ? restPct.toFixed(0) : restPct.toFixed(1)}%`));
+    }
+
+    const W = 200, H = 150, cx = W / 2, cy = H / 2, r = 52, ring = 20;
+    svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const C = 2 * Math.PI * r;
+
+    let cum = 0;
+    for (const item of list) {
+      const frac = (item.added + item.removed) / total;
+      if (frac <= 0) continue;
+      const seg = svg("circle", {
+        cx, cy, r,
+        fill: "none",
+        stroke: colorForLang(item.lang),
+        "stroke-width": ring,
+        // tiny gap between segments for legibility (skip for a lone segment)
+        "stroke-dasharray": `${Math.max(frac * C - (list.length > 1 ? 1.5 : 0), 0.5)} ${C}`,
+        "stroke-dashoffset": -cum * C,
+        // start at 12 o'clock: dasharray runs from 3 o'clock by default
+        transform: `rotate(-90 ${cx} ${cy})`,
+      });
+      const pct = frac * 100;
+      seg.addEventListener("mousemove", (e) => showLangTip(e, item, pct));
+      seg.addEventListener("mouseleave", hideLangTip);
+      svgEl.appendChild(seg);
+      cum += frac;
+    }
+
+    const totalText = svg("text", {
+      x: cx, y: cy - 2, "text-anchor": "middle", class: "donut-total",
+    });
+    totalText.textContent = fmtTokens(total);
+    svgEl.appendChild(totalText);
+    const subText = svg("text", {
+      x: cx, y: cy + 14, "text-anchor": "middle", class: "donut-sub",
+    });
+    subText.textContent = "lines ±";
+    svgEl.appendChild(subText);
+  }
+
+  function showLangTip(e, item, pct) {
+    const t = els.langTip;
+    clear(t);
+    t.appendChild(el("div", { class: "tt-day" }, [
+      el("span", { class: "tt-sw", style: `background:${colorForLang(item.lang)}` }),
+      document.createTextNode(` ${item.lang} · ${pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)}%`),
+    ]));
+    t.appendChild(el("div", { class: "tt-total" }, [
+      el("span", null, `${fmtInt(item.edits)} edit(s)`),
+      el("span", null, `+${fmtTokens(item.added)} −${fmtTokens(item.removed)}`),
+    ]));
+    t.hidden = false;
+    moveLangTip(e);
+  }
+  function moveLangTip(e) {
+    const t = els.langTip;
+    const tw = t.offsetWidth, th = t.offsetHeight;
+    let left = e.clientX - tw / 2;
+    let top  = e.clientY - th - 10;
+    const pad = 8;
+    left = Math.max(pad, Math.min(left, window.innerWidth - tw - pad));
+    if (top < pad) {
+      top = e.clientY + 14;
+      if (top + th > window.innerHeight - pad) top = window.innerHeight - th - pad;
+    }
+    t.style.left = left + "px";
+    t.style.top  = top + "px";
+  }
+  function hideLangTip() { els.langTip.hidden = true; }
 
   // ---- ledger -------------------------------------------------------------
   function renderLedger() {

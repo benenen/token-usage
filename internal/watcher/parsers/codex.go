@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,18 +31,18 @@ type codexParser struct{}
 
 func init() { register("codex", codexParser{}) }
 
-func (codexParser) Scan(path, tool string, prev FileState, backfillCutoff time.Duration, now time.Time) ([]types.UsageRecord, FileState, error) {
+func (codexParser) Scan(path, tool string, prev FileState, backfillCutoff time.Duration, now time.Time) (ScanResult, FileState, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, FileState{}, err
+		return ScanResult{}, FileState{}, err
 	}
 	inode := inodeOf(info)
 	size := info.Size()
 	if prev.Inode == inode && prev.Offset == size {
-		return nil, FileState{Inode: inode, Offset: size}, nil // unchanged
+		return ScanResult{}, FileState{Inode: inode, Offset: size}, nil // unchanged
 	}
-	recs, err := parseCodexFile(path, tool, backfillCutoff, now)
-	return recs, FileState{Inode: inode, Offset: size}, err
+	res, err := parseCodexFile(path, tool, backfillCutoff, now)
+	return res, FileState{Inode: inode, Offset: size}, err
 }
 
 type codexLine struct {
@@ -72,60 +73,129 @@ type codexTokens struct {
 	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 }
 
-func parseCodexFile(path, tool string, backfillCutoff time.Duration, now time.Time) ([]types.UsageRecord, error) {
+// codexPatchCall is one apply_patch custom_tool_call awaiting its output
+// line. Codex writes the call and its custom_tool_call_output as separate
+// JSONL lines (output later in the file); we only emit EditRecords for
+// calls whose output confirms the patch actually applied (exit_code 0).
+// Since this parser re-reads the whole file whenever it changes, a call
+// whose output hasn't been flushed yet is simply picked up next tick.
+type codexPatchCall struct {
+	callID string
+	ts     string
+	files  []codexFilePatch
+}
+
+func parseCodexFile(path, tool string, backfillCutoff time.Duration, now time.Time) (ScanResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return ScanResult{}, err
 	}
 	defer f.Close()
 	br := bufio.NewReaderSize(f, 64<<10)
 
-	sessionID := sessionIDFromFilename(filepath.Base(path))
-	model := ""
-	project := projectFromPath(path)
-	var prev codexTokens
-	var out []types.UsageRecord
+	st := &codexScanState{
+		sessionID: sessionIDFromFilename(filepath.Base(path)),
+		project:   projectFromPath(path),
+		patchOK:   make(map[string]bool),
+	}
 
 	for {
 		line, rerr := br.ReadBytes('\n')
 		if len(line) > 0 {
-			emitCodexLine(line, &model, &sessionID, &prev, project, tool, backfillCutoff, now, &out)
+			emitCodexLine(line, st, tool, backfillCutoff, now)
 		}
 		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				return out, nil
+			if !errors.Is(rerr, io.EOF) {
+				return st.result(tool, backfillCutoff, now), rerr
 			}
-			return out, rerr
+			return st.result(tool, backfillCutoff, now), nil
 		}
 	}
 }
 
-func emitCodexLine(
-	line []byte,
-	model *string,
-	sessionID *string,
-	prev *codexTokens,
-	project, tool string,
-	backfillCutoff time.Duration,
-	now time.Time,
-	out *[]types.UsageRecord,
-) {
+// codexScanState accumulates per-file parse state across lines.
+type codexScanState struct {
+	sessionID string
+	model     string
+	project   string
+	prev      codexTokens
+	usage     []types.UsageRecord
+	patches   []codexPatchCall
+	patchOK   map[string]bool
+}
+
+// result assembles the final ScanResult, emitting one EditRecord per
+// file of every apply_patch whose output confirmed success.
+func (st *codexScanState) result(tool string, backfillCutoff time.Duration, now time.Time) ScanResult {
+	res := ScanResult{Usage: st.usage}
+	for _, p := range st.patches {
+		if !st.patchOK[p.callID] {
+			continue
+		}
+		ts, _ := time.Parse(time.RFC3339Nano, p.ts)
+		if ts.IsZero() {
+			ts = now
+		}
+		for i, fp := range p.files {
+			res.Edits = append(res.Edits, types.EditRecord{
+				EventID:      p.callID + "#" + strconv.Itoa(i),
+				SessionID:    st.sessionID,
+				Tool:         tool,
+				Timestamp:    ts,
+				Lang:         langFromPath(fp.path),
+				LinesAdded:   fp.added,
+				LinesRemoved: fp.removed,
+				ProjectPath:  st.project,
+				Backfill:     backfillCutoff > 0 && now.Sub(ts) > backfillCutoff,
+			})
+		}
+	}
+	return res
+}
+
+type codexToolCall struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+	Output string `json:"output"`
+}
+
+func emitCodexLine(line []byte, st *codexScanState, tool string, backfillCutoff time.Duration, now time.Time) {
 	var l codexLine
 	if err := json.Unmarshal(line, &l); err != nil {
 		return
 	}
 	switch l.Type {
 	case "session_meta":
-		if *sessionID == "" {
+		if st.sessionID == "" {
 			var meta codexSessionMeta
 			if json.Unmarshal(l.Payload, &meta) == nil {
-				*sessionID = meta.ID
+				st.sessionID = meta.ID
 			}
 		}
 	case "turn_context":
 		var tc codexTurnContext
 		if json.Unmarshal(l.Payload, &tc) == nil && tc.Model != "" {
-			*model = tc.Model
+			st.model = tc.Model
+		}
+	case "response_item":
+		var call codexToolCall
+		if json.Unmarshal(l.Payload, &call) != nil {
+			return
+		}
+		switch call.Type {
+		case "custom_tool_call":
+			if call.Name != "apply_patch" || call.CallID == "" {
+				return
+			}
+			if files := parseApplyPatch(call.Input); len(files) > 0 {
+				st.patches = append(st.patches, codexPatchCall{callID: call.CallID, ts: l.Timestamp, files: files})
+			}
+		case "custom_tool_call_output":
+			if call.CallID != "" && codexOutputSucceeded(call.Output) {
+				st.patchOK[call.CallID] = true
+			}
 		}
 	case "event_msg":
 		var tc codexTokenCount
@@ -136,10 +206,10 @@ func emitCodexLine(
 			return
 		}
 		t := tc.Info.TotalTokenUsage
-		dIn := t.InputTokens - prev.InputTokens
-		dOut := t.OutputTokens - prev.OutputTokens
-		dCache := t.CachedInputTokens - prev.CachedInputTokens
-		dReason := t.ReasoningOutputTokens - prev.ReasoningOutputTokens
+		dIn := t.InputTokens - st.prev.InputTokens
+		dOut := t.OutputTokens - st.prev.OutputTokens
+		dCache := t.CachedInputTokens - st.prev.CachedInputTokens
+		dReason := t.ReasoningOutputTokens - st.prev.ReasoningOutputTokens
 		if dIn <= 0 && dOut <= 0 && dCache <= 0 && dReason <= 0 {
 			return // dup emission of the previous turn's totals
 		}
@@ -155,7 +225,7 @@ func emitCodexLine(
 		if dReason < 0 {
 			dReason = 0
 		}
-		*prev = *t
+		st.prev = *t
 
 		ts, _ := time.Parse(time.RFC3339Nano, l.Timestamp)
 		if ts.IsZero() {
@@ -163,20 +233,79 @@ func emitCodexLine(
 		}
 		backfill := backfillCutoff > 0 && now.Sub(ts) > backfillCutoff
 
-		*out = append(*out, types.UsageRecord{
-			MessageID:           "cdx_" + *sessionID + "_" + l.Timestamp,
-			SessionID:           *sessionID,
+		st.usage = append(st.usage, types.UsageRecord{
+			MessageID:           "cdx_" + st.sessionID + "_" + l.Timestamp,
+			SessionID:           st.sessionID,
 			Tool:                tool,
-			Model:               *model,
+			Model:               st.model,
 			Timestamp:           ts,
 			InputTokens:         dIn,
 			OutputTokens:        dOut + dReason, // reasoning is billable output
 			CacheCreationTokens: 0,              // codex has no separate cache write
 			CacheReadTokens:     dCache,
-			ProjectPath:         project,
+			ProjectPath:         st.project,
 			Backfill:            backfill,
 		})
 	}
+}
+
+// codexFilePatch is the per-file diffstat of one apply_patch section.
+type codexFilePatch struct {
+	path           string
+	added, removed int64
+}
+
+// parseApplyPatch walks codex's apply_patch envelope format:
+//
+//	*** Begin Patch
+//	*** Update File: <path>   (or Add File / Delete File)
+//	@@ hunk header
+//	-removed
+//	+added
+//	*** End Patch
+//
+// and returns per-file added/removed counts. Delete File sections carry
+// no body, so they are skipped (nothing meaningful to count).
+func parseApplyPatch(input string) []codexFilePatch {
+	var out []codexFilePatch
+	cur := -1 // index into out; -1 = not inside a counted section
+	for _, l := range strings.Split(input, "\n") {
+		switch {
+		case strings.HasPrefix(l, "*** Update File: "), strings.HasPrefix(l, "*** Add File: "):
+			path := strings.TrimSpace(l[strings.Index(l, ": ")+2:])
+			out = append(out, codexFilePatch{path: path})
+			cur = len(out) - 1
+		case strings.HasPrefix(l, "*** "): // Delete File / End Patch / Move to / Begin Patch
+			cur = -1
+		case cur >= 0 && strings.HasPrefix(l, "+"):
+			out[cur].added++
+		case cur >= 0 && strings.HasPrefix(l, "-"):
+			out[cur].removed++
+		}
+	}
+	return out
+}
+
+// codexOutputSucceeded decides whether a custom_tool_call_output line
+// reports a successfully applied patch. The output field is itself a
+// JSON document {"output": "...", "metadata": {"exit_code": N}}; fall
+// back to the "Success." prefix convention when that shape is absent.
+func codexOutputSucceeded(output string) bool {
+	var parsed struct {
+		Output   string `json:"output"`
+		Metadata struct {
+			ExitCode *int `json:"exit_code"`
+		} `json:"metadata"`
+	}
+	if json.Unmarshal([]byte(output), &parsed) == nil {
+		if parsed.Metadata.ExitCode != nil {
+			return *parsed.Metadata.ExitCode == 0
+		}
+		if parsed.Output != "" {
+			return strings.HasPrefix(parsed.Output, "Success")
+		}
+	}
+	return strings.HasPrefix(output, "Success")
 }
 
 // rollout-2026-04-27T01-21-55-019dcc87-57a6-79e2-80ee-9a8c3b731c9b.jsonl

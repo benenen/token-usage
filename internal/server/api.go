@@ -23,6 +23,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	// network — put nginx auth / mTLS in front for stricter access.
 	mux.HandleFunc("/ingest", a.handleIngest)
 	mux.HandleFunc("/summary", a.handleSummary)
+	mux.HandleFunc("/langs", a.handleLangs)
 	mux.HandleFunc("/clock", a.handleClock)
 	mux.HandleFunc("/users", a.handleUsers)
 	mux.HandleFunc("/prices", a.handlePrices)
@@ -76,8 +77,17 @@ func (a *API) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
+	eacc, edup, err := a.Store.InsertEdits(r.Context(), req.MachineID, userID, req.Edits)
+	if err != nil {
+		log.Printf("ingest edits insert error from machine=%s user=%s: %v", req.MachineID, userID, err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(types.IngestResponse{Accepted: acc, Duplicates: dup})
+	_ = json.NewEncoder(w).Encode(types.IngestResponse{
+		Accepted: acc, Duplicates: dup,
+		EditsAccepted: eacc, EditsDuplicates: edup,
+	})
 }
 
 func extractBearer(h string) string {
@@ -140,6 +150,49 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 			Total:    row.Input + row.Output + row.CacheCC + row.CacheRR,
 			Messages: row.Messages,
 			Cost:     cost,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+type langRow struct {
+	Day          string `json:"day"`
+	User         string `json:"user"`
+	Tool         string `json:"tool"`
+	Lang         string `json:"lang"`
+	LinesAdded   int64  `json:"lines_added"`
+	LinesRemoved int64  `json:"lines_removed"`
+	Edits        int64  `json:"edits"`
+}
+
+// /langs?user=&from=&to=
+//
+// Per-day per-user per-tool per-language code-edit stats (lines added /
+// removed, edit-event count), read from edit_daily. Open like /summary.
+func (a *API) handleLangs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	rows, err := a.Store.LangAggregate(r.Context(), q.Get("user"),
+		parseTime(q.Get("from")), parseTime(q.Get("to")))
+	if err != nil {
+		log.Printf("langs aggregate error: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]langRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, langRow{
+			Day:          row.Day,
+			User:         row.User,
+			Tool:         row.Tool,
+			Lang:         row.Lang,
+			LinesAdded:   row.LinesAdded,
+			LinesRemoved: row.LinesRemoved,
+			Edits:        row.Edits,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

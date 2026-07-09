@@ -40,7 +40,7 @@ Internal packages:
 
 These are easy to break if you touch the wrong file:
 
-1. **`usage_daily` is maintained by the write path, not by a job.** The atomic upsert is a single CTE chain inside `store.go`'s `insertSQL` constant: detail `INSERT … ON CONFLICT DO NOTHING RETURNING` feeds `GROUP BY` feeds `usage_daily INSERT … ON CONFLICT … DO UPDATE SET col = col + EXCLUDED.col`. Only rows that actually inserted into detail get rolled into daily — dedup guarantees no double-counting. **Any schema change to either table must update that query in lockstep.**
+1. **`usage_daily` is maintained by the write path, not by a job.** The atomic upsert is a single CTE chain inside `store.go`'s `insertSQL` constant: detail `INSERT … ON CONFLICT DO NOTHING RETURNING` feeds `GROUP BY` feeds `usage_daily INSERT … ON CONFLICT … DO UPDATE SET col = col + EXCLUDED.col`. Only rows that actually inserted into detail get rolled into daily — dedup guarantees no double-counting. **Any schema change to either table must update that query in lockstep.** The same pattern (and the same rule) applies to `edit_detail`/`edit_daily` and `editInsertSQL` — code-edit events deduped on `event_id`, rolled up per `(day, user, machine, tool, lang)`.
 
 2. **Schema is the `const schema` string in `store.go`**, executed on every server startup; it must stay idempotent (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `DROP INDEX IF EXISTS`). There's a `DO $$ … ALTER TABLE usage RENAME TO usage_detail` block for v0.1 → v0.2 upgrades — keep that path working if you rename tables again.
 
@@ -56,7 +56,7 @@ These are easy to break if you touch the wrong file:
 
 The pipeline below the parser is format-agnostic — `Scanner.Sources`, checkpointing, batching, auth, the schema's `tool` column, the dashboard's color palette — none of it needs to change. What you add:
 
-- A new file `internal/watcher/parsers/<tool>.go` with a struct implementing the `Parser` interface and a `func init() { register("<tool>", parser{}) }`. See `claudecode.go` (tail-style append-only JSONL), `codex.go` (re-parse-on-size-change JSONL), and `opencode.go` (single SQLite db, no walk) for the three live patterns.
+- A new file `internal/watcher/parsers/<tool>.go` with a struct implementing the `Parser` interface and a `func init() { register("<tool>", parser{}) }`. See `claudecode.go` (tail-style append-only JSONL), `codex.go` (re-parse-on-size-change JSONL), and `opencode.go` (single SQLite db, no walk) for the three live patterns. `Scan` returns a `ScanResult{Usage, Edits}` — emitting `Edits` (file-edit events with lang + line counts, see `lang.go` for `langFromPath`/`diffLineCounts`) is optional; a parser that only tracks tokens just leaves it empty.
 - An entry in `KnownToolDefaults` in `internal/watcher/defaults.go` so the watcher auto-detects the tool when no `--source` is given. The path may be a directory OR a regular file — Scanner stats `Source.Root` and dispatches accordingly.
 - A model-name → color entry in `web/static/app.js`'s `MODEL_PALETTE` if the new tool emits unfamiliar model names.
 
@@ -68,4 +68,4 @@ The CLI already supports `--source tool=path` repeated, so users just add more `
 
 ## Git conventions
 
-The repo has no global git identity configured. When committing, use per-call `-c user.name=… -c user.email=…` rather than touching `~/.gitconfig`. Commits in this repo so far use `eko1 <eko1@owlmail.harford.edu>`.
+Commit with the repo-local identity — it is already configured here via `git config` (`benshi <shiben789@163.com>`); plain `git commit` picks it up. Never set `~/.gitconfig` globals and never hardcode a different identity with `-c`.

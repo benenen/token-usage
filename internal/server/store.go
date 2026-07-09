@@ -162,6 +162,41 @@ FROM usage_detail
 WHERE NOT EXISTS (SELECT 1 FROM usage_daily LIMIT 1)
 GROUP BY 1, 2, 3, 4, 5
 ON CONFLICT DO NOTHING;
+
+-- File-edit events (code lines added/removed per language), mirroring
+-- the usage_detail / usage_daily pair. Maintained by editInsertSQL's
+-- CTE chain — schema changes here must update that query in lockstep.
+CREATE TABLE IF NOT EXISTS edit_detail (
+    event_id      TEXT        PRIMARY KEY,   -- transcript-native id (uuid / call_id#n / part id)
+    session_id    TEXT        NOT NULL,
+    user_id       TEXT        NOT NULL,
+    machine_id    TEXT        NOT NULL,
+    tool          TEXT        NOT NULL DEFAULT 'claude-code',
+    lang          TEXT        NOT NULL DEFAULT 'other',
+    ts            TIMESTAMPTZ NOT NULL,
+    lines_added   BIGINT      NOT NULL DEFAULT 0,
+    lines_removed BIGINT      NOT NULL DEFAULT 0,
+    project_path  TEXT,
+    backfill      BOOLEAN     NOT NULL DEFAULT FALSE,
+    received_at   TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_edit_detail_user_ts ON edit_detail(user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_edit_detail_ts      ON edit_detail(ts);
+
+CREATE TABLE IF NOT EXISTS edit_daily (
+    day           DATE        NOT NULL,
+    user_id       TEXT        NOT NULL,
+    machine_id    TEXT        NOT NULL,
+    tool          TEXT        NOT NULL,
+    lang          TEXT        NOT NULL,
+    lines_added   BIGINT      NOT NULL DEFAULT 0,
+    lines_removed BIGINT      NOT NULL DEFAULT 0,
+    edits         BIGINT      NOT NULL DEFAULT 0,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (day, user_id, machine_id, tool, lang)
+);
+CREATE INDEX IF NOT EXISTS idx_edit_daily_day  ON edit_daily(day);
+CREATE INDEX IF NOT EXISTS idx_edit_daily_user ON edit_daily(user_id, day);
 `
 
 // insertSQL writes one batch in a single round trip:
@@ -265,6 +300,138 @@ func (s *Store) Insert(ctx context.Context, machineID, userID string, recs []typ
 	}
 	_ = rolled // currently unused; useful for future telemetry
 	return int(accepted), int(considered - accepted), nil
+}
+
+// editInsertSQL mirrors insertSQL for file-edit events: unpack the JSON
+// batch, INSERT into edit_detail (event_id dedup), roll only the
+// actually-inserted rows into edit_daily. Same atomicity contract.
+const editInsertSQL = `
+WITH input AS (
+    SELECT
+        (e->>'event_id')::text                            AS event_id,
+        COALESCE(e->>'session_id', '')::text              AS session_id,
+        $2::text                                          AS user_id,
+        $3::text                                          AS machine_id,
+        COALESCE(NULLIF(e->>'tool', ''), 'claude-code')   AS tool,
+        COALESCE(NULLIF(e->>'lang', ''), 'other')         AS lang,
+        (e->>'timestamp')::timestamptz                    AS ts,
+        COALESCE((e->>'lines_added')::bigint, 0)          AS lines_added,
+        COALESCE((e->>'lines_removed')::bigint, 0)        AS lines_removed,
+        NULLIF(e->>'project_path', '')                    AS project_path,
+        COALESCE((e->>'backfill')::bool, false)           AS backfill,
+        NOW()                                             AS received_at
+    FROM jsonb_array_elements($1::jsonb) AS e
+    WHERE COALESCE(e->>'event_id','') <> ''
+),
+ins AS (
+    INSERT INTO edit_detail (
+        event_id, session_id, user_id, machine_id, tool, lang, ts,
+        lines_added, lines_removed, project_path, backfill, received_at)
+    SELECT
+        event_id, session_id, user_id, machine_id, tool, lang, ts,
+        lines_added, lines_removed, project_path, backfill, received_at
+    FROM input
+    ON CONFLICT (event_id) DO NOTHING
+    RETURNING (ts AT TIME ZONE 'UTC')::date AS day,
+              user_id, machine_id, tool, lang, lines_added, lines_removed
+),
+agg AS (
+    SELECT day, user_id, machine_id, tool, lang,
+           SUM(lines_added)   AS added,
+           SUM(lines_removed) AS removed,
+           COUNT(*)           AS edits
+    FROM ins
+    GROUP BY 1, 2, 3, 4, 5
+),
+roll AS (
+    INSERT INTO edit_daily (day, user_id, machine_id, tool, lang,
+        lines_added, lines_removed, edits, updated_at)
+    SELECT day, user_id, machine_id, tool, lang, added, removed, edits, NOW()
+    FROM agg
+    ON CONFLICT (day, user_id, machine_id, tool, lang) DO UPDATE SET
+        lines_added   = edit_daily.lines_added   + EXCLUDED.lines_added,
+        lines_removed = edit_daily.lines_removed + EXCLUDED.lines_removed,
+        edits         = edit_daily.edits         + EXCLUDED.edits,
+        updated_at    = NOW()
+    RETURNING 1
+)
+SELECT (SELECT COUNT(*) FROM ins)::bigint   AS accepted,
+       (SELECT COUNT(*) FROM input)::bigint AS considered
+`
+
+// InsertEdits writes one batch of file-edit events atomically; both
+// edit_detail and edit_daily move forward together. Duplicate event_ids
+// (re-scans, spool replays) are dropped by the detail PK and never
+// double-count the daily rollup.
+func (s *Store) InsertEdits(ctx context.Context, machineID, userID string, edits []types.EditRecord) (int, int, error) {
+	if len(edits) == 0 {
+		return 0, 0, nil
+	}
+	payload, err := json.Marshal(edits)
+	if err != nil {
+		return 0, 0, err
+	}
+	var accepted, considered int64
+	err = s.pool.QueryRow(ctx, editInsertSQL, string(payload), userID, machineID).
+		Scan(&accepted, &considered)
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(accepted), int(considered - accepted), nil
+}
+
+// LangRow is one (day, user, tool, lang) aggregate of code-edit stats.
+type LangRow struct {
+	Day          string
+	User         string
+	Tool         string
+	Lang         string
+	LinesAdded   int64
+	LinesRemoved int64
+	Edits        int64
+}
+
+// LangAggregate returns per-day per-user per-tool per-language edit
+// totals (UTC days) from the pre-aggregated edit_daily table. Filter
+// semantics match Aggregate: empty user = all users, zero times = open
+// range.
+func (s *Store) LangAggregate(ctx context.Context, user string, from, to time.Time) ([]LangRow, error) {
+	q := `
+SELECT to_char(day, 'YYYY-MM-DD') AS day_s,
+       user_id, tool, lang,
+       SUM(lines_added), SUM(lines_removed), SUM(edits)
+FROM edit_daily
+WHERE ($1 = '' OR user_id = $1)
+  AND ($2::date IS NULL OR day >= $2)
+  AND ($3::date IS NULL OR day <  $3)
+GROUP BY day, user_id, tool, lang
+ORDER BY day DESC, user_id, tool, lang
+`
+	var fromArg, toArg any
+	if !from.IsZero() {
+		fromArg = from.UTC()
+	}
+	if !to.IsZero() {
+		toArg = to.UTC()
+	}
+	rows, err := s.pool.Query(ctx, q, user, fromArg, toArg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LangRow
+	for rows.Next() {
+		var r LangRow
+		if err := rows.Scan(&r.Day, &r.User, &r.Tool, &r.Lang,
+			&r.LinesAdded, &r.LinesRemoved, &r.Edits); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ----- model_prices CRUD ----------------------------------------------------

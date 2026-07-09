@@ -49,6 +49,16 @@ Two tables, both managed automatically by the server on first start.
 Maintained atomically in the same transaction as detail inserts via
 `INSERT … RETURNING` → `GROUP BY` → `INSERT … ON CONFLICT … DO UPDATE SET … += …`.
 
+**`edit_detail` / `edit_daily`** — file-edit events (code lines added/removed,
+per language) mirroring the usage pair. The watcher extracts them from the same
+transcripts: Claude Code Edit/Write `structuredPatch`es, codex `apply_patch`
+calls (only ones whose output confirms success), opencode edit/write tool parts.
+Language is derived from the file extension (`.go`→`golang`, `.java`→`java`, …,
+unknown→`other`); file paths and contents never leave the machine — only the
+language tag and line counts are uploaded. Deduped on `event_id` (the
+transcript's own uuid / call id / part id), rolled up per
+`(day, user_id, machine_id, tool, lang)`.
+
 **`users` / `api_keys`** — multi-tenant identity. Watchers authenticate with a
 `tuk_…` bearer token; the server stores only the sha256 of each key.
 
@@ -140,15 +150,23 @@ a sortable ledger, and an at-a-glance daily cost chart broken down by model.
 
 | Method | Path        | Auth          | Purpose                                                   |
 | ------ | ----------- | ------------- | --------------------------------------------------------- |
-| POST   | `/ingest`   | Bearer key    | Batch usage records from a watcher.                       |
+| POST   | `/ingest`   | Bearer key    | Batch usage records and/or edit events from a watcher.    |
 | GET    | `/summary`  | open          | Per-day per-user per-model totals + cost.                 |
+| GET    | `/langs`    | open          | Per-day per-user per-tool per-language code-edit stats.   |
 | GET    | `/users`    | open          | List of registered users.                                 |
 | GET    | `/prices`   | open          | Active model prices + per-prefix history (LiteLLM-synced).|
 | GET    | `/healthz`  | open          | Liveness probe.                                           |
 | GET    | `/`         | open          | Embedded dashboard (HTML/CSS/JS).                         |
 | GET    | `/static/*` | open          | Dashboard CSS / JS.                                       |
 
-`/summary` accepts `?user=<id>&from=<RFC3339 | unix>&to=<…>`. Empty params mean no filter.
+`/summary` and `/langs` accept `?user=<id>&from=<RFC3339 | unix>&to=<…>`. Empty params mean no filter.
+
+Note on upgrades: edit events ride in a separate `/ingest` request from usage
+records, so an upgraded watcher keeps working against a pre-`/langs` server
+(the edits-only batches are rejected and dropped; token accounting is
+unaffected). Upgrade the server first to capture everything. Historical edits
+older than the watcher's checkpoint can be backfilled by deleting the
+checkpoint file and letting the watcher re-scan — the server dedups.
 
 Read endpoints are open within the trusted network — front with nginx / mTLS for
 stricter access.

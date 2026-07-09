@@ -169,10 +169,11 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 	up.Flush(ctx)
 
 	scanStart := time.Now()
-	recs, pending, err := sc.Scan()
+	scanned, pending, err := sc.Scan()
 	if err != nil {
 		log.Printf("scan: %v", err)
 	}
+	recs, edits := scanned.Usage, scanned.Edits
 	elapsed := time.Since(scanStart).Round(time.Millisecond)
 
 	// One scan-summary line per tick, regardless of whether anything
@@ -180,9 +181,9 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 	// from a hung one. Per-tool breakdown shows both files walked AND
 	// new records — i.e. an idle claude-code source still shows up as
 	// `claude-code 0/801`, proving it's being scanned.
-	log.Printf("scan: %s in %s", formatPerToolScan(sc.Sources, pending, recs), elapsed)
+	log.Printf("scan: %s in %s", formatPerToolScan(sc.Sources, pending, recs, edits), elapsed)
 
-	if len(recs) == 0 {
+	if len(recs) == 0 && len(edits) == 0 {
 		if len(pending) > 0 {
 			for p, s := range pending {
 				ckpt.Set(p, s)
@@ -203,29 +204,23 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 			r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheReadTokens,
 			r.MessageID, r.SessionID, r.ProjectPath, r.Backfill)
 	}
+	for _, e := range edits {
+		log.Printf("  ingest-edit: tool=%s lang=%s +%d/-%d event=%s session=%s project=%s backfill=%v",
+			e.Tool, e.Lang, e.LinesAdded, e.LinesRemoved,
+			e.EventID, e.SessionID, e.ProjectPath, e.Backfill)
+	}
 
-	batches := (len(recs) + batchSize - 1) / batchSize
-	allDurable := true
-	sendStart := time.Now()
-	for start := 0; start < len(recs); start += batchSize {
-		end := min(start+batchSize, len(recs))
-		res, err := up.Send(ctx, recs[start:end])
-		if err != nil {
-			log.Printf("send: %v", err)
-			allDurable = false
-			break
-		}
-		idx := start/batchSize + 1
-		// Always log every batch's server-side accept/dup tally — that's
-		// the only place "I sent N but only K were new on the server"
-		// surfaces. Without this, dedup on the server is invisible and
-		// looks like "I ingested 42 records but the dashboard didn't move".
-		status := fmt.Sprintf("accepted=%d duplicates=%d", res.Accepted, res.Duplicates)
-		if res.Spooled {
-			status = fmt.Sprintf("spooled (post failed: %v) — will retry on next tick", res.SpoolReason)
-		}
-		log.Printf("  batch %d/%d sent (%d records, %s elapsed): %s",
-			idx, batches, end-start, time.Since(sendStart).Round(time.Millisecond), status)
+	// Usage batches first, then edit batches — separate requests so a
+	// pre-edits server still takes the usage stream (see Uploader.SendEdits).
+	// The checkpoint only advances when EVERY batch of BOTH kinds is
+	// durable (200 or spooled); on failure the server dedups re-sends.
+	allDurable := sendBatched(len(recs), batchSize, "", func(start, end int) (watcher.SendResult, error) {
+		return up.Send(ctx, recs[start:end])
+	})
+	if allDurable {
+		allDurable = sendBatched(len(edits), batchSize, "edit ", func(start, end int) (watcher.SendResult, error) {
+			return up.SendEdits(ctx, edits[start:end])
+		})
 	}
 	if !allDurable {
 		return
@@ -240,6 +235,38 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 	//  already says exactly what landed on the server.)
 }
 
+// sendBatched slices [0,n) into batchSize windows and sends each via
+// send(), logging every batch's server tally. Returns false as soon as a
+// batch is neither accepted nor spooled (caller must then NOT advance
+// the checkpoint).
+func sendBatched(n, batchSize int, kind string, send func(start, end int) (watcher.SendResult, error)) bool {
+	if n == 0 {
+		return true
+	}
+	batches := (n + batchSize - 1) / batchSize
+	sendStart := time.Now()
+	for start := 0; start < n; start += batchSize {
+		end := min(start+batchSize, n)
+		res, err := send(start, end)
+		if err != nil {
+			log.Printf("send: %v", err)
+			return false
+		}
+		idx := start/batchSize + 1
+		// Always log every batch's server-side accept/dup tally — that's
+		// the only place "I sent N but only K were new on the server"
+		// surfaces. Without this, dedup on the server is invisible and
+		// looks like "I ingested 42 records but the dashboard didn't move".
+		status := fmt.Sprintf("accepted=%d duplicates=%d", res.Accepted, res.Duplicates)
+		if res.Spooled {
+			status = fmt.Sprintf("spooled (post failed: %v) — will retry on next tick", res.SpoolReason)
+		}
+		log.Printf("  %sbatch %d/%d sent (%d records, %s elapsed): %s",
+			kind, idx, batches, end-start, time.Since(sendStart).Round(time.Millisecond), status)
+	}
+	return true
+}
+
 // formatPerToolScan renders the per-tool "new/walked" summary used by
 // runOnce's per-tick log line. Files are attributed to tools by
 // longest-Source.Root prefix match on each pending path; records
@@ -250,9 +277,10 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 //
 // Always emits every configured source, even ones with zero files and
 // zero records, so an idle source is visibly being scanned.
-func formatPerToolScan(sources []watcher.Source, pending map[string]watcher.FileState, recs []types.UsageRecord) string {
+func formatPerToolScan(sources []watcher.Source, pending map[string]watcher.FileState, recs []types.UsageRecord, edits []types.EditRecord) string {
 	files := make(map[string]int, len(sources))
 	news := make(map[string]int, len(sources))
+	newEdits := make(map[string]int, len(sources))
 	for _, src := range sources {
 		files[src.Tool] = 0
 		news[src.Tool] = 0
@@ -265,6 +293,9 @@ func formatPerToolScan(sources []watcher.Source, pending map[string]watcher.File
 	for _, r := range recs {
 		news[r.Tool]++
 	}
+	for _, e := range edits {
+		newEdits[e.Tool]++
+	}
 	tools := make([]string, 0, len(files))
 	for t := range files {
 		tools = append(tools, t)
@@ -272,7 +303,11 @@ func formatPerToolScan(sources []watcher.Source, pending map[string]watcher.File
 	sort.Strings(tools)
 	parts := make([]string, 0, len(tools))
 	for _, t := range tools {
-		parts = append(parts, fmt.Sprintf("%s %d/%d", t, news[t], files[t]))
+		s := fmt.Sprintf("%s %d/%d", t, news[t], files[t])
+		if n := newEdits[t]; n > 0 {
+			s += fmt.Sprintf(" (+%d edits)", n)
+		}
+		parts = append(parts, s)
 	}
 	return strings.Join(parts, ", ")
 }

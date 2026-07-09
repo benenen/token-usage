@@ -3,12 +3,12 @@ package watcher
 import (
 	"io/fs"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"tokenusage/internal/types"
 	"tokenusage/internal/watcher/parsers"
 )
 
@@ -33,11 +33,12 @@ type Scanner struct {
 }
 
 // Scan walks every Source root for *.jsonl in parallel goroutines (one
-// per source) and returns merged records + per-file FileState. The caller
-// must persist the checkpoint only AFTER successfully uploading.
-func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
+// per source) and returns merged usage records + edit events + per-file
+// FileState. The caller must persist the checkpoint only AFTER
+// successfully uploading (or spooling) everything.
+func (s *Scanner) Scan() (parsers.ScanResult, map[string]FileState, error) {
 	type result struct {
-		recs    []types.UsageRecord
+		res     parsers.ScanResult
 		pending map[string]FileState
 		err     error
 	}
@@ -55,7 +56,7 @@ func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 				return
 			}
 			pending := make(map[string]FileState)
-			var recs []types.UsageRecord
+			var acc parsers.ScanResult
 
 			// Source.Root may be a single file (e.g. opencode's SQLite db)
 			// rather than a directory of *.jsonl. In that case skip WalkDir
@@ -67,12 +68,11 @@ func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 				if perr != nil {
 					log.Printf("scanner: parse %s (%s): %v", src.Root, src.Tool, perr)
 				} else {
-					if len(r) > 0 {
-						recs = append(recs, r...)
-					}
+					acc.Usage = append(acc.Usage, r.Usage...)
+					acc.Edits = append(acc.Edits, r.Edits...)
 					pending[src.Root] = state
 				}
-				results[i] = result{recs: recs, pending: pending}
+				results[i] = result{res: acc, pending: pending}
 				return
 			}
 
@@ -89,32 +89,28 @@ func (s *Scanner) Scan() ([]types.UsageRecord, map[string]FileState, error) {
 					log.Printf("scanner: parse %s (%s): %v", path, src.Tool, perr)
 					return nil
 				}
-				if len(r) > 0 {
-					recs = append(recs, r...)
-				}
+				acc.Usage = append(acc.Usage, r.Usage...)
+				acc.Edits = append(acc.Edits, r.Edits...)
 				pending[path] = state
 				return nil
 			})
-			results[i] = result{recs: recs, pending: pending, err: err}
+			results[i] = result{res: acc, pending: pending, err: err}
 		}(i, src)
 	}
 	wg.Wait()
 
-	var allRecs []types.UsageRecord
+	var all parsers.ScanResult
 	allPending := make(map[string]FileState)
 	var firstErr error
 	for _, r := range results {
-		if len(r.recs) > 0 {
-			allRecs = append(allRecs, r.recs...)
-		}
-		for p, st := range r.pending {
-			allPending[p] = st
-		}
+		all.Usage = append(all.Usage, r.res.Usage...)
+		all.Edits = append(all.Edits, r.res.Edits...)
+		maps.Copy(allPending, r.pending)
 		if r.err != nil && firstErr == nil {
 			firstErr = r.err
 		}
 	}
-	return allRecs, allPending, firstErr
+	return all, allPending, firstErr
 }
 
 type unknownParserErr string

@@ -552,6 +552,48 @@ body::before {
   color: var(--bone);
   font-size: 12px;
 }
+.rank .rk-val .lines-add { color: #94c67e; }
+.rank .rk-val .lines-del { color: #d96e9a; }
+.lang-donut-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 190px;
+}
+.lang-donut-wrap svg {
+  width: 100%;
+  max-width: 260px;
+  height: 190px;
+}
+.rank .rk-share {
+  color: var(--text-dim);
+  font-size: 10px;
+  margin-left: 8px;
+  letter-spacing: 0.03em;
+}
+/* Code card: fixed-height list, scroll past the fold. Height matches the
+   Share card's donut+legend block so the two cards sit level. */
+#lang-rank {
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 6px;   /* keep the +/− column off the scrollbar */
+}
+.lang-legend {
+  justify-content: center;
+  margin-top: 4px;
+}
+.lang-donut-wrap circle { cursor: pointer; }
+.donut-total {
+  fill: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.donut-sub {
+  fill: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
 .rank .rk-bar {
   grid-column: 2 / -1;
   height: 2px;

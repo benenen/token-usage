@@ -125,7 +125,27 @@
     <ol class="rank" id="tool-rank"></ol>
   </section>
 
-  <section class="card span-full stagger" style="--idx:6">
+  <section class="card span-2 stagger" style="--idx:6">
+    <header class="card-head">
+      <h2><em class="serif-i">Code</em></h2>
+      <span class="dim small">lines edited by language</span>
+    </header>
+    <ol class="rank" id="lang-rank"></ol>
+    <p class="dim small" id="lang-empty" hidden>no edit events yet — upgrade the watcher to report them</p>
+  </section>
+
+  <section class="card stagger" style="--idx:7">
+    <header class="card-head">
+      <h2><em class="serif-i">Share</em></h2>
+      <span class="dim small">% of lines touched</span>
+    </header>
+    <div class="lang-donut-wrap">
+      <svg id="lang-donut" preserveAspectRatio="xMidYMid meet" aria-label="language share of edited lines"></svg>
+    </div>
+    <ul class="legend lang-legend" id="lang-legend"></ul>
+  </section>
+
+  <section class="card span-full stagger" style="--idx:8">
     <header class="card-head">
       <h2><em class="serif-i">Ledger</em> <span class="dim">// day · user · model</span></h2>
       <div class="ledger-controls">
@@ -203,6 +223,7 @@ token-usage-watcher \
 <div id="tooltip" class="tooltip" hidden></div>
 <div id="heatmap-tooltip" class="tooltip" hidden></div>
 <div id="clock-tooltip" class="tooltip" hidden></div>
+<div id="lang-tooltip" class="tooltip" hidden></div>
 <script src="/static/app.js"></script>
 </body>
 </html>
