@@ -32,7 +32,7 @@ Internal packages:
 - **`internal/server/auth.go`** — API key minting (`tuk_` + 192 bits of base64url) and resolution. Keys are stored as `sha256` hex.
 - **`internal/server/api.go`** — HTTP handlers + `Register(mux)`. Only `/ingest` requires auth.
 - **`internal/server/web.go`** + **`internal/server/web/`** — dashboard embedded with `//go:embed`.
-- **`internal/watcher/scanner.go`** — incremental source walker. Per-tool parser lives in `internal/watcher/parsers/` and is selected by `Source.Tool`. Today: claude-code + codex (JSONL files under a dir) and opencode (single SQLite db file). `Source.Root` may be a directory or a regular file — Scanner stats it and dispatches accordingly.
+- **`internal/watcher/scanner.go`** — incremental source walker. Per-tool parser lives in `internal/watcher/parsers/` and is selected by `Source.Tool`. Today: claude-code + codex + pi (JSONL files under a dir) and opencode (single SQLite db file). `Source.Root` may be a directory or a regular file — Scanner stats it and dispatches accordingly.
 - **`internal/watcher/uploader.go`** — batched HTTP POST with offline spool dir + bearer auth.
 - **`internal/watcher/checkpoint.go`** — atomic `(tmp + rename)` JSON persistence.
 
@@ -56,7 +56,7 @@ These are easy to break if you touch the wrong file:
 
 The pipeline below the parser is format-agnostic — `Scanner.Sources`, checkpointing, batching, auth, the schema's `tool` column, the dashboard's color palette — none of it needs to change. What you add:
 
-- A new file `internal/watcher/parsers/<tool>.go` with a struct implementing the `Parser` interface and a `func init() { register("<tool>", parser{}) }`. See `claudecode.go` (tail-style append-only JSONL), `codex.go` (re-parse-on-size-change JSONL), and `opencode.go` (single SQLite db, no walk) for the three live patterns. `Scan` returns a `ScanResult{Usage, Edits}` — emitting `Edits` (file-edit events with lang + line counts, see `lang.go` for `langFromPath`/`diffLineCounts`) is optional; a parser that only tracks tokens just leaves it empty.
+- A new file `internal/watcher/parsers/<tool>.go` with a struct implementing the `Parser` interface and a `func init() { register("<tool>", parser{}) }`. See `claudecode.go` and `pi.go` (tail-style append-only JSONL), `codex.go` (re-parse-on-size-change JSONL), and `opencode.go` (single SQLite db, no walk) for the live patterns. `Scan` returns a `ScanResult{Usage, Edits}` — emitting `Edits` (file-edit events with lang + line counts, see `lang.go` for `langFromPath`/`diffLineCounts`) is optional; a parser that only tracks tokens just leaves it empty.
 - An entry in `KnownToolDefaults` in `internal/watcher/defaults.go` so the watcher auto-detects the tool when no `--source` is given. The path may be a directory OR a regular file — Scanner stats `Source.Root` and dispatches accordingly.
 - A model-name → color entry in `web/static/app.js`'s `MODEL_PALETTE` if the new tool emits unfamiliar model names.
 

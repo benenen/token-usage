@@ -52,7 +52,8 @@ Maintained atomically in the same transaction as detail inserts via
 **`edit_detail` / `edit_daily`** — file-edit events (code lines added/removed,
 per language) mirroring the usage pair. The watcher extracts them from the same
 transcripts: Claude Code Edit/Write `structuredPatch`es, codex `apply_patch`
-calls (only ones whose output confirms success), opencode edit/write tool parts.
+calls (only ones whose output confirms success), opencode edit/write tool parts,
+pi `write`/`edit` toolCall arguments.
 Language is derived from the file extension (`.go`→`golang`, `.java`→`java`, …,
 unknown→`other`); file paths and contents never leave the machine — only the
 language tag and line counts are uploaded. Deduped on `event_id` (the
@@ -112,7 +113,7 @@ served at `http://host:8080/`.
 That's it. The watcher will:
 
 1. **Auto-detect** every supported tool on the box (currently `claude-code`,
-   `codex`, `opencode`) and walk each one's transcript root in parallel.
+   `codex`, `opencode`, `pi`) and walk each one's transcript root in parallel.
 2. On first run, ship the **whole history** (records older than 1h are tagged
    `backfill=true` so they don't spike the live curves).
 3. On every subsequent tick (default 5s), ship only the new tail; per-file
@@ -226,8 +227,9 @@ token-usage-watcher [run]   tail transcripts and ship usage (default if no subco
 ```
 
 Supported tools today: **claude-code** (`~/.claude/projects/**/*.jsonl`),
-**codex** (`~/.codex/sessions/**/*.jsonl`), and **opencode**
-(`~/.local/share/opencode/opencode.db`, a single SQLite file). The watcher
+**codex** (`~/.codex/sessions/**/*.jsonl`), **opencode**
+(`~/.local/share/opencode/opencode.db`, a single SQLite file), and **pi**
+(`~/.pi/agent/sessions/**/*.jsonl`). The watcher
 auto-detects whichever of these exist on the box. Adding a new tool is a
 new file under `internal/watcher/parsers/`; the rest of the pipeline
 (checkpoint, batching, auth, schema) is format-agnostic.

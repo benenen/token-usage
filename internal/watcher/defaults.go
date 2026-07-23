@@ -20,6 +20,7 @@ var KnownToolDefaults = []struct {
 	{Tool: "claude-code", Subpath: ".claude/projects"},
 	{Tool: "codex", Subpath: ".codex/sessions"},
 	{Tool: "opencode", Subpath: ".local/share/opencode/opencode.db"},
+	{Tool: "pi", Subpath: ".pi/agent/sessions"},
 }
 
 // AutoDetectSources returns every KnownToolDefault root that exists across
