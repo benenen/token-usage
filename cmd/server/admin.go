@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"text/tabwriter"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"tokenusage/internal/server"
+	"tokenusage/internal/watcher"
 )
 
 // All admin commands inherit --dsn from root via PersistentFlags. They
@@ -28,8 +30,75 @@ func newAdminCmd() *cobra.Command {
 		newKeyCreateCmd(),
 		newKeyListCmd(),
 		newKeyRevokeCmd(),
+		newCodexRepairCmd(),
 	)
 	return cmd
+}
+
+// ----- codex-repair --------------------------------------------------------
+func newCodexRepairCmd() *cobra.Command {
+	var sessionsRoot, userID, machineID string
+	var apply bool
+	cmd := &cobra.Command{
+		Use:   "codex-repair",
+		Short: "Reconcile historical Codex tokens from original session JSONL files",
+		Args:  cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			if sessionsRoot == "" || userID == "" || machineID == "" {
+				return errors.New("--sessions, --user, and --machine are required")
+			}
+			cp := &watcher.Checkpoint{Files: make(map[string]watcher.FileState)}
+			scanner := watcher.Scanner{
+				Sources:    []watcher.Source{{Tool: "codex", Root: sessionsRoot}},
+				Checkpoint: cp,
+			}
+			result, _, err := scanner.Scan()
+			if err != nil {
+				return fmt.Errorf("scan sessions: %w", err)
+			}
+			st, err := mustOpenStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			stats, err := st.RepairCodexUsage(c.Context(), userID, machineID, result.Usage, apply)
+			if err != nil {
+				if stats.Parsed > 0 || stats.DatabaseRows > 0 {
+					printCodexRepairStats(c.OutOrStdout(), stats, apply, true)
+				}
+				return fmt.Errorf("repair codex usage: %w", err)
+			}
+			printCodexRepairStats(c.OutOrStdout(), stats, apply, false)
+			if !apply {
+				fmt.Fprintln(c.OutOrStdout(), "dry-run only; re-run with --apply after taking a database backup")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sessionsRoot, "sessions", "", "Codex sessions root (for example ~/.codex/sessions)")
+	cmd.Flags().StringVar(&userID, "user", "", "database user_id to repair")
+	cmd.Flags().StringVar(&machineID, "machine", "", "database machine_id to repair")
+	cmd.Flags().BoolVar(&apply, "apply", false, "apply the repair (default is dry-run)")
+	return cmd
+}
+
+func printCodexRepairStats(w io.Writer, s server.CodexRepairStats, applyRequested, aborted bool) {
+	mode := "DRY-RUN"
+	if aborted {
+		mode = "ABORTED"
+	} else if s.Applied {
+		mode = "APPLIED"
+	} else if applyRequested {
+		mode = "NO-CHANGES"
+	}
+	fmt.Fprintf(w, "%s parsed=%d database=%d matched=%d changed=%d missing_source=%d missing_db=%d\n",
+		mode, s.Parsed, s.DatabaseRows, s.Matched, s.Changed, s.MissingSource, s.MissingDB)
+	fmt.Fprintf(w, "tokens input %d -> %d, output %d -> %d, cache_read %d\n",
+		s.OldInput, s.NewInput, s.OldOutput, s.NewOutput, s.CacheRead)
+	if s.From != nil && s.To != nil {
+		fmt.Fprintf(w, "affected range %s .. %s\n", s.From.UTC().Format(time.RFC3339), s.To.UTC().Format(time.RFC3339))
+	}
 }
 
 func mustOpenStore() (*server.Store, error) {

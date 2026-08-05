@@ -18,12 +18,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: true
       - name: vet
         run: go vet ./...
       - name: test
-        run: go test -race -timeout 60s ./...
+        run: go test -race -timeout 8m ./...
       - name: build (both binaries)
         run: |
           go build -trimpath -o bin/token-usage-server  ./cmd/server

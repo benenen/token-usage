@@ -184,10 +184,20 @@ token-usage-server admin [--dsn <DSN>] <command> [flags] [args]
   key-create  [--name <label>] <user_id>         mint a new api key (printed once)
   key-list    [--user <user_id>]                 list api keys (prefix only)
   key-revoke  <prefix>                           revoke an api key by its 12-char prefix
+  codex-repair --sessions <dir> --user <id>
+               --machine <id> [--apply]          replay and repair Codex token history
 ```
 
 API keys are formatted `tuk_<43-char-base64url>` (≈192 bits of entropy). Only the
 sha256 is stored — leaked DB dumps cannot replay against the API.
+
+`codex-repair` is dry-run by default. It replays the original Codex JSONL
+files, matches existing rows by their database primary key, and reports any
+database row whose source file is missing. `--apply` refuses incomplete source
+coverage, updates only the four token columns, and rebuilds affected daily
+aggregates in the same transaction. Stop that machine's watcher and take a
+verified PostgreSQL backup before applying; retain the watcher checkpoint and
+restart with the corrected watcher binary afterward.
 
 ---
 

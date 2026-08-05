@@ -15,10 +15,13 @@ import (
 )
 
 // codexParser handles OpenAI codex CLI rollout sessions. Sessions live at
-//   ~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<uuid>.jsonl
+//
+//	~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<uuid>.jsonl
 //
 // Each line is {timestamp, type, payload}. Token usage lives in
-//   event_msg.payload.type == "token_count"
+//
+//	event_msg.payload.type == "token_count"
+//
 // where payload.info.total_token_usage is the *cumulative* running total
 // for the session. payload.info.last_token_usage exists too but Codex
 // emits it duplicated across consecutive events, so summing it double-
@@ -225,6 +228,15 @@ func emitCodexLine(line []byte, st *codexScanState, tool string, backfillCutoff 
 		if dReason < 0 {
 			dReason = 0
 		}
+		// Codex reports cached input and reasoning output as breakdowns of
+		// input_tokens and output_tokens respectively. Store only uncached
+		// input in the regular input column; pricing accounts for the cached
+		// portion separately via cache_read_tokens. Output already includes
+		// reasoning, so adding dReason would charge those tokens twice.
+		dUncached := dIn - dCache
+		if dUncached < 0 {
+			dUncached = 0
+		}
 		st.prev = *t
 
 		ts, _ := time.Parse(time.RFC3339Nano, l.Timestamp)
@@ -239,9 +251,9 @@ func emitCodexLine(line []byte, st *codexScanState, tool string, backfillCutoff 
 			Tool:                tool,
 			Model:               st.model,
 			Timestamp:           ts,
-			InputTokens:         dIn,
-			OutputTokens:        dOut + dReason, // reasoning is billable output
-			CacheCreationTokens: 0,              // codex has no separate cache write
+			InputTokens:         dUncached,
+			OutputTokens:        dOut, // already includes billable reasoning output
+			CacheCreationTokens: 0,    // codex has no separate cache write
 			CacheReadTokens:     dCache,
 			ProjectPath:         st.project,
 			Backfill:            backfill,
@@ -309,7 +321,8 @@ func codexOutputSucceeded(output string) bool {
 }
 
 // rollout-2026-04-27T01-21-55-019dcc87-57a6-79e2-80ee-9a8c3b731c9b.jsonl
-//                                       └────────────────── UUID ──────────┘
+//
+//	└────────────────── UUID ──────────┘
 func sessionIDFromFilename(name string) string {
 	base := strings.TrimSuffix(name, ".jsonl")
 	parts := strings.Split(base, "-")
