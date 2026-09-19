@@ -76,6 +76,12 @@ func PlatformInstallHint(backend string) string {
 }
 
 // supervisord stubs — Linux-only feature; surface a clear error here.
+// SecureUnitFile is a no-op on macOS. The LaunchAgent/LaunchDaemon
+// plist carries the API key the same way a systemd unit does, but
+// whether launchd still loads a 0600 plist hasn't been verified on a
+// mac — so the permissions are left as launchd's own writer set them.
+func SecureUnitFile(string) error { return nil }
+
 func InstallSupervisor(_, _, _ string, _ []string) error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }

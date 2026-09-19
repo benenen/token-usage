@@ -121,6 +121,11 @@ func installOne(backend, self, apiKey, endpoint string, extra []string) error {
 	if err := s.Install(); err != nil {
 		return fmt.Errorf("install: %w", err)
 	}
+	// The unit/plist kardianos just wrote holds the API key, so don't
+	// leave it world-readable.
+	if err := svc.SecureUnitFile(backend); err != nil {
+		return fmt.Errorf("secure unit file: %w", err)
+	}
 	if err := s.Start(); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}

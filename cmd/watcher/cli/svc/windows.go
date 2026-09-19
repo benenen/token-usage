@@ -86,6 +86,10 @@ func isElevated() bool {
 }
 
 // supervisord stubs — never available on Windows.
+// SecureUnitFile is a no-op on Windows: the SCM keeps the service's
+// environment in the registry under the service key, not in a file.
+func SecureUnitFile(string) error { return nil }
+
 func InstallSupervisor(_, _, _ string, _ []string) error {
 	return fmt.Errorf("--backend supervisor is only available on Linux (current OS: %s)", runtime.GOOS)
 }

@@ -64,6 +64,18 @@ func Config(backend, self, apiKey, endpoint string, extra []string) (*service.Co
 			return nil, errors.New("user backend isn't supported on Windows; use --backend system (needs admin)")
 		}
 		cfg.Option["UserService"] = true
+		if runtime.GOOS == "linux" {
+			// kardianos's stock systemd unit is written for a system
+			// service and breaks twice under `systemctl --user`:
+			// LogOutput emits StandardOutput=file:/var/log/… which the
+			// user can't write (the unit dies with 209/STDOUT), and
+			// WantedBy=multi-user.target parks the enable symlink in a
+			// target the user instance never reaches, so the watcher
+			// wouldn't come back after a reboot. Swap in a user-scoped
+			// template: journald for logs, default.target for Install.
+			cfg.Option["LogOutput"] = false
+			cfg.Option["SystemdScript"] = userSystemdScript
+		}
 	case "system":
 		// machine-wide service — needs root/admin
 	default:
@@ -71,6 +83,39 @@ func Config(backend, self, apiKey, endpoint string, extra []string) (*service.Co
 	}
 	return cfg, nil
 }
+
+// userSystemdScript is kardianos's stock systemd template minus the
+// two system-service assumptions (see Config): no StandardOutput=file:
+// lines — journald already captures a user unit's stdout/stderr, read
+// back by `journalctl --user -u` in ShowLogs — and WantedBy=default.target,
+// which is what a `systemd --user` instance actually pulls in at login.
+// RestartSec is spelled out here because the stock template hardcodes
+// 120s and ignores the Option value.
+const userSystemdScript = `[Unit]
+Description={{.Description}}
+ConditionFileIsExecutable={{.Path|cmdEscape}}
+{{range $i, $dep := .Dependencies}} 
+{{$dep}} {{end}}
+
+[Service]
+StartLimitInterval=5
+StartLimitBurst=10
+ExecStart={{.Path|cmdEscape}}{{range .Arguments}} {{.|cmd}}{{end}}
+{{if .WorkingDirectory}}WorkingDirectory={{.WorkingDirectory|cmdEscape}}{{end}}
+{{if .ReloadSignal}}ExecReload=/bin/kill -{{.ReloadSignal}} "$MAINPID"{{end}}
+{{if .PIDFile}}PIDFile={{.PIDFile|cmd}}{{end}}
+{{if gt .LimitNOFILE -1 }}LimitNOFILE={{.LimitNOFILE}}{{end}}
+{{if .Restart}}Restart={{.Restart}}{{end}}
+{{if .SuccessExitStatus}}SuccessExitStatus={{.SuccessExitStatus}}{{end}}
+RestartSec=10
+
+{{range $k, $v := .EnvVars -}}
+Environment={{$k}}={{$v}}
+{{end -}}
+
+[Install]
+WantedBy=default.target
+`
 
 // StatusName turns kardianos's enum into a CLI-friendly word.
 func StatusName(s service.Status) string {

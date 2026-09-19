@@ -124,6 +124,29 @@ func PlatformInstallHint(backend string) string {
 	return ""
 }
 
+// SecureUnitFile tightens a freshly-written systemd unit down to 0600.
+// The unit carries TOKENUSAGE_API_KEY in an Environment= line and
+// kardianos creates it 0644; systemd reads it as the unit's owner (the
+// user for --user units, root for system ones), so nothing needs the
+// extra read bits. The supervisord backend already keeps its secret in
+// a 0600 env file, so there's nothing to tighten there.
+func SecureUnitFile(backend string) error {
+	var path string
+	switch backend {
+	case "user":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		path = filepath.Join(home, ".config", "systemd", "user", Name+".service")
+	case "system":
+		path = "/etc/systemd/system/" + Name + ".service"
+	default:
+		return nil
+	}
+	return os.Chmod(path, 0o600)
+}
+
 // InstallSupervisor writes a /etc/supervisor/conf.d/<svc>.conf file plus
 // a 0600 env file under /etc, then runs `supervisorctl reread && update`.
 // Drops the API key in the env file (not the program config, which is
