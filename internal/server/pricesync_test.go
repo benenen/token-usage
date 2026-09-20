@@ -82,3 +82,19 @@ func TestSelectPriceRowsPrefersCompleteCacheTariff(t *testing.T) {
 		t.Fatalf("rows = %+v, want the entry carrying cache pricing", rows)
 	}
 }
+
+func TestNormalizeModelStripsEveryProviderSegment(t *testing.T) {
+	cases := map[string]string{
+		"openrouter/deepseek/deepseek-v4.1-flash": "deepseek-v4.1-flash",
+		"anthropic/claude-3-5-sonnet-20241022":    "claude-3-5-sonnet",
+		"accounts/fireworks/models/qwen3-32b":     "qwen3-32b",
+		"claude-opus-4-1-20250805":                "claude-opus-4-1",
+		"gpt-4o-2024-08-06":                       "gpt-4o",
+		"gpt-4o":                                  "gpt-4o",
+	}
+	for in, want := range cases {
+		if got := normalizeModel(in); got != want {
+			t.Errorf("normalizeModel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

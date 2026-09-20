@@ -237,14 +237,20 @@ func derefFloat(p *float64) float64 {
 
 // normalizeModel strips provider prefixes and trailing version-date
 // suffixes so LiteLLM keys collapse into a stable family identifier that
-// matches the model strings Claude Code / Codex actually emit.
+// matches the model strings Claude Code / Codex / pi actually emit.
 //
-//	"anthropic/claude-3-5-sonnet-20241022"  -> "claude-3-5-sonnet"
-//	"claude-opus-4-1-20250805"              -> "claude-opus-4-1"
-//	"gpt-4o-2024-08-06"                     -> "gpt-4o"
-//	"gpt-4o"                                -> "gpt-4o"
+//	"anthropic/claude-3-5-sonnet-20241022"     -> "claude-3-5-sonnet"
+//	"openrouter/deepseek/deepseek-v4.1-flash"  -> "deepseek-v4.1-flash"
+//	"claude-opus-4-1-20250805"                 -> "claude-opus-4-1"
+//	"gpt-4o-2024-08-06"                        -> "gpt-4o"
+//	"gpt-4o"                                   -> "gpt-4o"
+//
+// Every path segment goes, not just the first: a two-segment key like
+// openrouter/deepseek/… otherwise keeps a slash that no emitted model
+// name can ever match, which is why pi's deepseek-v4.1-flash — 331M
+// tokens of it — priced at $0.
 func normalizeModel(s string) string {
-	if i := strings.IndexByte(s, '/'); i >= 0 {
+	if i := strings.LastIndexByte(s, '/'); i >= 0 {
 		s = s[i+1:]
 	}
 	return dateSuffixRe.ReplaceAllString(s, "")
