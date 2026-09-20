@@ -1,7 +1,9 @@
 package parsers
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -176,5 +178,95 @@ func TestCodexTokenUsageUsesCumulativeDeltasAndSkipsDuplicates(t *testing.T) {
 			t.Errorf("usage[%d] = input/output/cache %d/%d/%d, want %d/%d/%d",
 				i, got.InputTokens, got.OutputTokens, got.CacheReadTokens, want.input, want.output, want.cache)
 		}
+	}
+}
+
+// The current codex CLI runs everything through one `exec` tool: the
+// patch arrives as an escaped string argument inside the script, and the
+// result comes back as an array of content parts rather than a string.
+func TestCodexExecApplyPatchEmitsEdits(t *testing.T) {
+	envelope := "*** Begin Patch\n" +
+		"*** Update File: /w/proj/app.ts\n" +
+		"@@\n" +
+		"-const a = 1;\n" +
+		"+const a = 2;\n" +
+		"+use(a);\n" +
+		"*** End Patch"
+	script := `text(await tools.exec_command({cmd:"ls -la"}));` + "\n" +
+		`text(await tools.apply_patch(` + strconv.Quote(envelope) + `));`
+
+	line := func(payload map[string]any, ts string) string {
+		b, err := json.Marshal(map[string]any{"timestamp": ts, "type": "response_item", "payload": payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b) + "\n"
+	}
+	okParts := []any{
+		map[string]any{"type": "input_text", "text": "Script completed\nWall time 0.2 seconds"},
+		map[string]any{"type": "input_text", "text": `{"chunk_id":"674f38","exit_code":0,"output":""}`},
+	}
+	failParts := []any{
+		map[string]any{"type": "input_text", "text": `{"chunk_id":"674f39","exit_code":1,"output":"patch failed"}`},
+	}
+
+	fixture := `{"timestamp":"2026-07-01T10:00:00.000Z","type":"turn_context","payload":{"model":"gpt-6-astra"}}` + "\n" +
+		line(map[string]any{"type": "custom_tool_call", "call_id": "call_exec_ok", "name": "exec", "input": script}, "2026-07-01T10:00:01.000Z") +
+		line(map[string]any{"type": "custom_tool_call_output", "call_id": "call_exec_ok", "output": okParts}, "2026-07-01T10:00:02.000Z") +
+		line(map[string]any{"type": "custom_tool_call", "call_id": "call_exec_bad", "name": "exec", "input": script}, "2026-07-01T10:00:03.000Z") +
+		line(map[string]any{"type": "custom_tool_call_output", "call_id": "call_exec_bad", "output": failParts}, "2026-07-01T10:00:04.000Z")
+
+	path := writeFixture(t, "rollout-2026-07-01T10-00-00-019dcc87-57a6-79e2-80ee-9a8c3b731c9b.jsonl", fixture)
+	res, _, err := codexParser{}.Scan(path, "codex", FileState{}, 0, time.Date(2026, 7, 1, 11, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Edits) != 1 {
+		t.Fatalf("edit records = %d, want 1 (only the exit_code 0 call): %+v", len(res.Edits), res.Edits)
+	}
+	e := res.Edits[0]
+	if e.EventID != "call_exec_ok#0" || e.Lang != "typescript" || e.LinesAdded != 2 || e.LinesRemoved != 1 {
+		t.Errorf("edit = %+v, want call_exec_ok#0 typescript +2/-1", e)
+	}
+}
+
+// Same patch, piped to the apply_patch binary through a heredoc: there is
+// no tools.apply_patch(…) call to pick apart, just the envelope in the
+// script text.
+func TestCodexExecHeredocPatchEmitsEdits(t *testing.T) {
+	script := "apply_patch <<'EOF'\n" +
+		"*** Begin Patch\n*** Add File: /w/proj/new.py\n+print(1)\n+print(2)\n*** End Patch\nEOF"
+	b, err := json.Marshal(map[string]any{
+		"timestamp": "2026-07-01T10:00:01.000Z", "type": "response_item",
+		"payload": map[string]any{
+			"type": "custom_tool_call", "call_id": "call_heredoc", "name": "exec",
+			"input": `text(await tools.exec_command({cmd:` + strconv.Quote(script) + `}));`,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(map[string]any{
+		"timestamp": "2026-07-01T10:00:02.000Z", "type": "response_item",
+		"payload": map[string]any{
+			"type": "custom_tool_call_output", "call_id": "call_heredoc",
+			"output": []any{map[string]any{"type": "input_text", "text": `{"exit_code":0}`}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := writeFixture(t, "rollout-2026-07-01T10-00-00-019dcc87-57a6-79e2-80ee-9a8c3b731c9c.jsonl",
+		string(b)+"\n"+string(out)+"\n")
+
+	res, _, err := codexParser{}.Scan(path, "codex", FileState{}, 0, time.Date(2026, 7, 1, 11, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Edits) != 1 {
+		t.Fatalf("edit records = %d, want 1: %+v", len(res.Edits), res.Edits)
+	}
+	if e := res.Edits[0]; e.Lang != "python" || e.LinesAdded != 2 {
+		t.Errorf("edit = %+v, want python +2", e)
 	}
 }

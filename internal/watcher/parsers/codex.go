@@ -76,7 +76,7 @@ type codexTokens struct {
 	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 }
 
-// codexPatchCall is one apply_patch custom_tool_call awaiting its output
+// codexPatchCall is one patch-bearing custom_tool_call awaiting its output
 // line. Codex writes the call and its custom_tool_call_output as separate
 // JSONL lines (output later in the file); we only emit EditRecords for
 // calls whose output confirms the patch actually applied (exit_code 0).
@@ -161,7 +161,11 @@ type codexToolCall struct {
 	CallID string `json:"call_id"`
 	Name   string `json:"name"`
 	Input  string `json:"input"`
-	Output string `json:"output"`
+	// Output is raw because its shape changed: older codex sent a JSON
+	// string, the current CLI sends an array of {type,text} parts. Decoding
+	// it as a string took the whole line down with it, which silently
+	// stopped every patch from ever being confirmed.
+	Output json.RawMessage `json:"output"`
 }
 
 func emitCodexLine(line []byte, st *codexScanState, tool string, backfillCutoff time.Duration, now time.Time) {
@@ -189,14 +193,18 @@ func emitCodexLine(line []byte, st *codexScanState, tool string, backfillCutoff 
 		}
 		switch call.Type {
 		case "custom_tool_call":
-			if call.Name != "apply_patch" || call.CallID == "" {
+			if call.CallID == "" {
 				return
 			}
-			if files := parseApplyPatch(call.Input); len(files) > 0 {
+			var files []codexFilePatch
+			for _, env := range codexPatchEnvelopes(call.Name, call.Input) {
+				files = append(files, parseApplyPatch(env)...)
+			}
+			if len(files) > 0 {
 				st.patches = append(st.patches, codexPatchCall{callID: call.CallID, ts: l.Timestamp, files: files})
 			}
 		case "custom_tool_call_output":
-			if call.CallID != "" && codexOutputSucceeded(call.Output) {
+			if call.CallID != "" && codexOutputSucceeded(codexOutputText(call.Output)) {
 				st.patchOK[call.CallID] = true
 			}
 		}
@@ -298,10 +306,190 @@ func parseApplyPatch(input string) []codexFilePatch {
 	return out
 }
 
-// codexOutputSucceeded decides whether a custom_tool_call_output line
-// reports a successfully applied patch. The output field is itself a
-// JSON document {"output": "...", "metadata": {"exit_code": N}}; fall
-// back to the "Success." prefix convention when that shape is absent.
+const (
+	beginPatchMarker = "*** Begin Patch"
+	applyPatchCall   = "tools.apply_patch("
+)
+
+// codexPatchEnvelopes returns every apply_patch envelope carried by one
+// tool call. Three shapes exist in the wild:
+//
+//   - name "apply_patch": the whole input is the envelope (older codex).
+//   - name "exec": the current CLI drives everything through one exec
+//     tool whose input is a script; a patch arrives as the escaped string
+//     argument of tools.apply_patch("*** Begin Patch\n…").
+//   - the same exec script piping a heredoc into the apply_patch binary,
+//     where the envelope is just somewhere in the script text.
+//
+// Matching only on the tool name (as we used to) means the current CLI
+// records no edits at all.
+func codexPatchEnvelopes(name, input string) []string {
+	if name == "apply_patch" {
+		return []string{input}
+	}
+	if !strings.Contains(input, "Begin Patch") {
+		return nil
+	}
+	var out []string
+	for rest := input; ; {
+		i := strings.Index(rest, applyPatchCall)
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len(applyPatchCall):]
+		arg, n := jsStringLiteral(rest)
+		if n > 0 {
+			rest = rest[n:]
+			if strings.Contains(arg, beginPatchMarker) {
+				out = append(out, arg)
+			}
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	// Heredoc form: no call to pick apart, so unescape the script wholesale
+	// and let parseApplyPatch find the envelope's own markers.
+	if unescaped := unescapeJS(input); strings.Contains(unescaped, beginPatchMarker) {
+		return []string{unescaped}
+	}
+	return nil
+}
+
+// jsStringLiteral reads the quoted string literal at the start of s
+// (leading whitespace allowed) and returns its unescaped contents plus
+// how many bytes of s it consumed. A missing or unterminated literal
+// returns 0, which the caller treats as "nothing to extract here".
+func jsStringLiteral(s string) (string, int) {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	if i >= len(s) || (s[i] != '"' && s[i] != '\'' && s[i] != '`') {
+		return "", 0
+	}
+	quote := s[i]
+	i++
+	var b strings.Builder
+	for i < len(s) {
+		switch {
+		case s[i] == '\\':
+			text, next := decodeEscape(s, i)
+			b.WriteString(text)
+			i = next
+		case s[i] == quote:
+			return b.String(), i + 1
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return "", 0 // unterminated
+}
+
+// unescapeJS decodes backslash escapes across a whole script, for the
+// heredoc case where there is no single literal to isolate.
+func unescapeJS(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\\' {
+			text, next := decodeEscape(s, i)
+			b.WriteString(text)
+			i = next
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// decodeEscape decodes the escape sequence starting at s[i] (a backslash)
+// and returns the text it stands for plus the index just past it. An
+// unknown escape yields the escaped character itself, which keeps quotes
+// and slashes intact without inventing content.
+func decodeEscape(s string, i int) (string, int) {
+	if i+1 >= len(s) {
+		return "\\", i + 1
+	}
+	switch c := s[i+1]; c {
+	case 'n':
+		return "\n", i + 2
+	case 't':
+		return "\t", i + 2
+	case 'r':
+		return "\r", i + 2
+	case 'u':
+		if i+6 <= len(s) {
+			if v, err := strconv.ParseUint(s[i+2:i+6], 16, 32); err == nil {
+				return string(rune(v)), i + 6
+			}
+		}
+		return "u", i + 2
+	default:
+		return string(c), i + 2
+	}
+}
+
+// codexOutputText flattens a custom_tool_call_output payload to text:
+// a bare JSON string for older codex, or the concatenated `text` fields
+// of the current CLI's content-part array.
+func codexOutputText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return str
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var b strings.Builder
+		for _, p := range parts {
+			b.WriteString(p.Text)
+			b.WriteByte('\n')
+		}
+		return b.String()
+	}
+	return string(raw)
+}
+
+// lastExitCode returns the last "exit_code": N found in free text. The
+// current CLI reports the shell result as a JSON blob inside one of the
+// output parts rather than as a structured field.
+func lastExitCode(s string) (int, bool) {
+	const key = `"exit_code"`
+	code, found := 0, false
+	for i := 0; ; {
+		j := strings.Index(s[i:], key)
+		if j < 0 {
+			return code, found
+		}
+		k := i + j + len(key)
+		for k < len(s) && (s[k] == ' ' || s[k] == ':') {
+			k++
+		}
+		end := k
+		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+			end++
+		}
+		if end > k {
+			if v, err := strconv.Atoi(s[k:end]); err == nil {
+				code, found = v, true
+			}
+		}
+		i = k
+	}
+}
+
+// codexOutputSucceeded decides whether a custom_tool_call_output reports
+// a successfully applied patch. Older codex wrapped the result in a JSON
+// document {"output": "...", "metadata": {"exit_code": N}}; the current
+// CLI reports the shell exit code inside the output text. Fall back to
+// the "Success." prefix convention when neither shape is present.
 func codexOutputSucceeded(output string) bool {
 	var parsed struct {
 		Output   string `json:"output"`
@@ -316,6 +504,9 @@ func codexOutputSucceeded(output string) bool {
 		if parsed.Output != "" {
 			return strings.HasPrefix(parsed.Output, "Success")
 		}
+	}
+	if code, ok := lastExitCode(output); ok {
+		return code == 0
 	}
 	return strings.HasPrefix(output, "Success")
 }
