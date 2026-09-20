@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -62,50 +63,12 @@ func SyncPrices(ctx context.Context, store *Store, sourceURL string, client *htt
 		return 0, 0, err
 	}
 
-	// Group normalized prefixes; if multiple LiteLLM entries collapse to
-	// the same prefix, prefer the one that has cache pricing (more
-	// recent, fully specified). Otherwise the first wins.
-	type candidate struct {
-		entry  liteLLMEntry
-		source string // original LiteLLM key, kept for the `source` column
-	}
-	chosen := map[string]candidate{}
+	rows := selectPriceRows(raw)
 
-	for name, e := range raw {
-		if e.Mode != "" && e.Mode != "chat" && e.Mode != "completion" {
-			continue
-		}
-		if e.InputCostPerToken == nil || e.OutputCostPerToken == nil {
-			continue
-		}
-		prefix := normalizeModel(name)
-		if prefix == "" {
-			continue
-		}
-		ex, exists := chosen[prefix]
-		if !exists {
-			chosen[prefix] = candidate{entry: e, source: name}
-			continue
-		}
-		// Prefer entry that has cache pricing info if the previous didn't.
-		if (ex.entry.CacheCreationCostPerToken == nil && ex.entry.CacheReadCostPerToken == nil) &&
-			(e.CacheCreationCostPerToken != nil || e.CacheReadCostPerToken != nil) {
-			chosen[prefix] = candidate{entry: e, source: name}
-		}
-	}
-
-	considered = len(chosen)
-	for prefix, c := range chosen {
-		row := PriceRow{
-			ModelPrefix:     prefix,
-			ValidFrom:       time.Now(),
-			InputPer1M:      *c.entry.InputCostPerToken * 1e6,
-			OutputPer1M:     *c.entry.OutputCostPerToken * 1e6,
-			CacheCreate1M:   derefFloat(c.entry.CacheCreationCostPerToken) * 1e6,
-			CacheCreate1h1M: derefFloat(c.entry.CacheCreation1hCostPerToken) * 1e6,
-			CacheRead1M:     derefFloat(c.entry.CacheReadCostPerToken) * 1e6,
-			Source:          "litellm:" + c.source,
-		}
+	considered = len(rows)
+	for _, row := range rows {
+		prefix := row.ModelPrefix
+		row.ValidFrom = time.Now()
 		didChange, uerr := store.UpsertPrice(ctx, row)
 		if uerr != nil {
 			log.Printf("pricesync: upsert %s: %v", prefix, uerr)
@@ -119,6 +82,89 @@ func SyncPrices(ctx context.Context, store *Store, sourceURL string, client *htt
 		}
 	}
 	return considered, changed, nil
+}
+
+// selectPriceRows turns the LiteLLM table into one PriceRow per
+// normalized model prefix.
+//
+// Several LiteLLM keys routinely collapse onto the same prefix — the
+// vendor's own entry plus vertex_ai/, azure_ai/, snowflake/, aihubmix/…
+// aliases of it — and they disagree about both rates and which cache
+// fields they carry. Picking by Go's map order (what this used to do)
+// made the winner, and therefore the price, flip on every sync:
+// gpt-5.6-sol alternated between $4 and $5 input for months, writing a
+// fresh model_prices history row each time and re-pricing whole days of
+// usage with it. The choice is now deterministic: rank by pricing
+// completeness, prefer the vendor's unprefixed key, and settle ties by
+// sorted key order.
+func selectPriceRows(raw map[string]liteLLMEntry) []PriceRow {
+	type candidate struct {
+		entry  liteLLMEntry
+		source string // original LiteLLM key, kept for the `source` column
+		rank   int
+	}
+	chosen := map[string]candidate{}
+
+	names := make([]string, 0, len(raw))
+	for name := range raw {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		e := raw[name]
+		if e.Mode != "" && e.Mode != "chat" && e.Mode != "completion" {
+			continue
+		}
+		if e.InputCostPerToken == nil || e.OutputCostPerToken == nil {
+			continue
+		}
+		prefix := normalizeModel(name)
+		if prefix == "" {
+			continue
+		}
+		c := candidate{entry: e, source: name, rank: priceCandidateRank(name, e)}
+		if ex, exists := chosen[prefix]; exists && ex.rank >= c.rank {
+			continue
+		}
+		chosen[prefix] = c
+	}
+
+	out := make([]PriceRow, 0, len(chosen))
+	for prefix, c := range chosen {
+		out = append(out, PriceRow{
+			ModelPrefix:     prefix,
+			InputPer1M:      *c.entry.InputCostPerToken * 1e6,
+			OutputPer1M:     *c.entry.OutputCostPerToken * 1e6,
+			CacheCreate1M:   derefFloat(c.entry.CacheCreationCostPerToken) * 1e6,
+			CacheCreate1h1M: derefFloat(c.entry.CacheCreation1hCostPerToken) * 1e6,
+			CacheRead1M:     derefFloat(c.entry.CacheReadCostPerToken) * 1e6,
+			Source:          "litellm:" + c.source,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ModelPrefix < out[j].ModelPrefix })
+	return out
+}
+
+// priceCandidateRank scores one LiteLLM entry competing for a prefix:
+// a fully specified cache tariff beats a partial one, and the vendor's
+// own key beats a reseller alias of it. Equal scores are settled by the
+// caller's sorted iteration, never by map order.
+func priceCandidateRank(key string, e liteLLMEntry) int {
+	rank := 0
+	if e.CacheCreationCostPerToken != nil {
+		rank += 8
+	}
+	if e.CacheCreation1hCostPerToken != nil {
+		rank += 4
+	}
+	if e.CacheReadCostPerToken != nil {
+		rank += 2
+	}
+	if !strings.Contains(key, "/") {
+		rank++
+	}
+	return rank
 }
 
 // fetchPriceJSONWithRetry retries up to PriceSyncMaxAttempts times with

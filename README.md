@@ -283,6 +283,13 @@ How the table gets populated:
    }
    ```
 
+When several LiteLLM keys normalize to the same prefix (the vendor's own
+entry plus `vertex_ai/`, `azure_ai/`, `snowflake/`, reseller aliases…), the
+winner is chosen deterministically: most complete cache tariff first, then
+the unprefixed vendor key, then sorted key order. Picking arbitrarily used
+to flip a model's rate back and forth on every sync and write a bogus
+price-history step each time.
+
 ### The 1-hour cache tier
 
 Anthropic bills a cache **write** at 1.25x base input for the default 5m
