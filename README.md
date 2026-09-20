@@ -52,10 +52,12 @@ Maintained atomically in the same transaction as detail inserts via
 
 **`edit_detail` / `edit_daily`** — file-edit events (code lines added/removed,
 per language) mirroring the usage pair. The watcher extracts them from the same
-transcripts: Claude Code Edit/Write `structuredPatch`es, codex `apply_patch`
-envelopes, whether they arrive as a dedicated tool call or embedded in the
-current CLI's single `exec` script (only ones whose output confirms success),
-opencode edit/write tool parts, pi `write`/`edit` toolCall arguments.
+transcripts: Claude Code Edit/Write `structuredPatch`es **and** `bashEditDiff`
+hunks (files changed by a Bash command — in bash-first sessions that is most of
+them), codex `apply_patch` envelopes, whether they arrive as a dedicated
+tool call or embedded in the current CLI's single `exec` script (only ones whose
+output confirms success), opencode edit/write tool parts, pi `write`/`edit`
+toolCall arguments.
 Language is derived from the file extension (`.go`→`golang`, `.java`→`java`, …,
 unknown→`other`); file paths and contents never leave the machine — only the
 language tag and line counts are uploaded. Deduped on `event_id` (the

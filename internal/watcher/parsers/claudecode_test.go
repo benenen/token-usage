@@ -89,6 +89,37 @@ func TestClaudeCodeEditBackfillCutoff(t *testing.T) {
 	}
 }
 
+// A file edited through Bash: same hunk shape as structuredPatch, but
+// reported under bashEditDiff with no top-level filePath, and possibly
+// several files at once.
+const claudeBashEditFixture = `{"type":"user","uuid":"uuid-bash-1","sessionId":"s1","timestamp":"2026-07-01T10:05:00.000Z","toolUseResult":{"stdout":"","interrupted":false,"bashEditDiff":{"files":[{"filePath":"/w/proj/a.go","hunks":[{"lines":["   ctx := context.Background()","-\told := 1","+\tnew := 2","+\tuse(new)"]}]},{"filePath":"/w/proj/notes.md","hunks":[{"lines":["+# title"]}]}],"moreFiles":0}}}
+{"type":"user","uuid":"uuid-bash-2","sessionId":"s1","timestamp":"2026-07-01T10:06:00.000Z","toolUseResult":{"stdout":"hello","interrupted":false}}
+`
+
+func TestClaudeCodeCountsBashEdits(t *testing.T) {
+	path := writeFixture(t, "bash.jsonl", claudeBashEditFixture)
+	now := time.Date(2026, 7, 1, 11, 0, 0, 0, time.UTC)
+
+	res, _, err := claudeCodeParser{}.Scan(path, "claude-code", FileState{}, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Edits) != 2 {
+		t.Fatalf("edit records = %d, want 2 (one per changed file): %+v", len(res.Edits), res.Edits)
+	}
+	a := res.Edits[0]
+	if a.EventID != "uuid-bash-1#0" || a.Lang != "golang" || a.LinesAdded != 2 || a.LinesRemoved != 1 {
+		t.Errorf("first bash edit = %+v, want uuid-bash-1#0 golang +2/-1", a)
+	}
+	b := res.Edits[1]
+	if b.EventID != "uuid-bash-1#1" || b.Lang != "markdown" || b.LinesAdded != 1 || b.LinesRemoved != 0 {
+		t.Errorf("second bash edit = %+v, want uuid-bash-1#1 markdown +1/-0", b)
+	}
+	if a.SessionID != "s1" || a.Tool != "claude-code" {
+		t.Errorf("identity fields wrong: %+v", a)
+	}
+}
+
 // The 1h subset drives the cache-write premium, so it must survive the
 // parse, stay within the reported total, and be 0 when absent.
 func TestClaudeCodeSplitsOneHourCacheCreation(t *testing.T) {

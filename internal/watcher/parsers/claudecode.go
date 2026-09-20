@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,8 +60,8 @@ func (claudeCodeParser) Scan(path, tool string, prev FileState, backfillCutoff t
 			cur += int64(len(line))
 			if rec, ok := parseClaudeCodeLine(line, project, tool, backfillCutoff, now); ok {
 				res.Usage = append(res.Usage, rec)
-			} else if edit, ok := parseClaudeCodeEditLine(line, project, tool, backfillCutoff, now); ok {
-				res.Edits = append(res.Edits, edit)
+			} else {
+				res.Edits = append(res.Edits, parseClaudeCodeEditLines(line, project, tool, backfillCutoff, now)...)
 			}
 		}
 		if rerr != nil {
@@ -167,56 +168,98 @@ type rawToolResult struct {
 	StructuredPatch []struct {
 		Lines []string `json:"lines"`
 	} `json:"structuredPatch"`
+	// BashEditDiff is how Claude Code reports files edited through Bash
+	// (sed, heredoc, a script). It carries the same hunk shape as
+	// structuredPatch but no top-level filePath, so requiring one used to
+	// drop every bash-made edit — which in bash-first sessions is most of
+	// them. `moreFiles` > 0 means the diff list itself was truncated by
+	// Claude Code; those files are simply not counted.
+	BashEditDiff *struct {
+		Files []struct {
+			FilePath string `json:"filePath"`
+			Hunks    []struct {
+				Lines []string `json:"lines"`
+			} `json:"hunks"`
+		} `json:"files"`
+	} `json:"bashEditDiff"`
 }
 
-// parseClaudeCodeEditLine extracts an EditRecord from a tool-result line
-// (type=="user" rows carrying a toolUseResult object). Errored tool
-// calls have a plain-string toolUseResult and are skipped, as is any
-// result without a filePath (reads, bash output, …).
-func parseClaudeCodeEditLine(line []byte, project, tool string, backfillCutoff time.Duration, now time.Time) (types.EditRecord, bool) {
+// parseClaudeCodeEditLines extracts the EditRecords of a tool-result line
+// (type=="user" rows carrying a toolUseResult object). Errored tool calls
+// have a plain-string toolUseResult and are skipped, as is any result
+// that touched no file (reads, plain bash output, …). An Edit/Write
+// result describes one file; a bash edit can touch several, so this
+// returns a slice.
+func parseClaudeCodeEditLines(line []byte, project, tool string, backfillCutoff time.Duration, now time.Time) []types.EditRecord {
 	var raw rawLine
 	if err := json.Unmarshal(line, &raw); err != nil {
-		return types.EditRecord{}, false
+		return nil
 	}
 	if raw.Type != "user" || raw.UUID == "" || len(raw.ToolUseResult) == 0 || raw.ToolUseResult[0] != '{' {
-		return types.EditRecord{}, false
+		return nil
 	}
 	var tr rawToolResult
 	if err := json.Unmarshal(raw.ToolUseResult, &tr); err != nil {
-		return types.EditRecord{}, false
-	}
-	if tr.FilePath == "" {
-		return types.EditRecord{}, false
-	}
-	var added, removed int64
-	switch {
-	case len(tr.StructuredPatch) > 0: // Edit, or Write-update with a diff
-		for _, hunk := range tr.StructuredPatch {
-			a, r := diffLineCounts(hunk.Lines)
-			added += a
-			removed += r
-		}
-	case (tr.Type == "create" || tr.Type == "update") && tr.Content != "":
-		// Write results ship no hunks — count the written content as
-		// added. For updates this over-counts slightly (the replaced
-		// lines aren't visible), same approximation as opencode writes.
-		added = int64(strings.Count(strings.TrimSuffix(tr.Content, "\n"), "\n")) + 1
-	default:
-		return types.EditRecord{}, false
+		return nil
 	}
 	ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
 	if ts.IsZero() {
 		ts = now
 	}
-	return types.EditRecord{
-		EventID:      raw.UUID,
-		SessionID:    raw.SessionID,
-		Tool:         tool,
-		Timestamp:    ts,
-		Lang:         langFromPath(tr.FilePath),
-		LinesAdded:   added,
-		LinesRemoved: removed,
-		ProjectPath:  project,
-		Backfill:     backfillCutoff > 0 && now.Sub(ts) > backfillCutoff,
-	}, true
+	rec := func(eventID, path string, added, removed int64) types.EditRecord {
+		return types.EditRecord{
+			EventID:      eventID,
+			SessionID:    raw.SessionID,
+			Tool:         tool,
+			Timestamp:    ts,
+			Lang:         langFromPath(path),
+			LinesAdded:   added,
+			LinesRemoved: removed,
+			ProjectPath:  project,
+			Backfill:     backfillCutoff > 0 && now.Sub(ts) > backfillCutoff,
+		}
+	}
+
+	if tr.FilePath != "" {
+		var added, removed int64
+		switch {
+		case len(tr.StructuredPatch) > 0: // Edit, or Write-update with a diff
+			for _, hunk := range tr.StructuredPatch {
+				a, r := diffLineCounts(hunk.Lines)
+				added += a
+				removed += r
+			}
+		case (tr.Type == "create" || tr.Type == "update") && tr.Content != "":
+			// Write results ship no hunks — count the written content as
+			// added. For updates this over-counts slightly (the replaced
+			// lines aren't visible), same approximation as opencode writes.
+			added = int64(strings.Count(strings.TrimSuffix(tr.Content, "\n"), "\n")) + 1
+		default:
+			return nil
+		}
+		// Keeps the event id it has always had, so re-reading a transcript
+		// cannot duplicate an edit already stored server-side.
+		return []types.EditRecord{rec(raw.UUID, tr.FilePath, added, removed)}
+	}
+
+	if tr.BashEditDiff == nil {
+		return nil
+	}
+	var out []types.EditRecord
+	for i, f := range tr.BashEditDiff.Files {
+		if f.FilePath == "" {
+			continue
+		}
+		var added, removed int64
+		for _, hunk := range f.Hunks {
+			a, r := diffLineCounts(hunk.Lines)
+			added += a
+			removed += r
+		}
+		if added == 0 && removed == 0 {
+			continue
+		}
+		out = append(out, rec(raw.UUID+"#"+strconv.Itoa(i), f.FilePath, added, removed))
+	}
+	return out
 }
