@@ -95,6 +95,14 @@ type rawUsage struct {
 	Output        int64 `json:"output_tokens"`
 	CacheCreation int64 `json:"cache_creation_input_tokens"`
 	CacheRead     int64 `json:"cache_read_input_tokens"`
+	// cache_creation splits the cache write by TTL. Claude Code with a
+	// 1-hour prompt cache puts everything in ephemeral_1h, which bills at
+	// 2x base input instead of the 5m default's 1.25x — without this the
+	// whole write is priced as if it were 5m.
+	CacheCreationDetail struct {
+		Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+		Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 func parseClaudeCodeLine(line []byte, project, tool string, backfillCutoff time.Duration, now time.Time) (types.UsageRecord, bool) {
@@ -119,19 +127,33 @@ func parseClaudeCodeLine(line []byte, project, tool string, backfillCutoff time.
 	}
 	backfill := backfillCutoff > 0 && now.Sub(ts) > backfillCutoff
 	return types.UsageRecord{
-		MessageID:           raw.Message.ID,
-		RequestID:           raw.RequestID,
-		SessionID:           raw.SessionID,
-		Tool:                tool,
-		Model:               raw.Message.Model,
-		Timestamp:           ts,
-		InputTokens:         raw.Message.Usage.Input,
-		OutputTokens:        raw.Message.Usage.Output,
-		CacheCreationTokens: raw.Message.Usage.CacheCreation,
-		CacheReadTokens:     raw.Message.Usage.CacheRead,
-		ProjectPath:         project,
-		Backfill:            backfill,
+		MessageID:             raw.Message.ID,
+		RequestID:             raw.RequestID,
+		SessionID:             raw.SessionID,
+		Tool:                  tool,
+		Model:                 raw.Message.Model,
+		Timestamp:             ts,
+		InputTokens:           raw.Message.Usage.Input,
+		OutputTokens:          raw.Message.Usage.Output,
+		CacheCreationTokens:   raw.Message.Usage.CacheCreation,
+		CacheCreation1hTokens: clampTo(raw.Message.Usage.CacheCreationDetail.Ephemeral1h, raw.Message.Usage.CacheCreation),
+		CacheReadTokens:       raw.Message.Usage.CacheRead,
+		ProjectPath:           project,
+		Backfill:              backfill,
 	}, true
+}
+
+// clampTo keeps the 1h subset within the reported cache-creation total, so
+// a transcript that disagrees with itself can never price more 1h tokens
+// than were written.
+func clampTo(v, max int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 // rawToolResult mirrors the toolUseResult object of Edit / Write tool

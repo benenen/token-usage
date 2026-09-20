@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS model_prices (
     input_per_1m          DOUBLE PRECISION NOT NULL,
     output_per_1m         DOUBLE PRECISION NOT NULL,
     cache_creation_per_1m DOUBLE PRECISION NOT NULL DEFAULT 0,
+    cache_creation_1h_per_1m DOUBLE PRECISION NOT NULL DEFAULT 0,
     cache_read_per_1m     DOUBLE PRECISION NOT NULL DEFAULT 0,
     source                TEXT             NOT NULL DEFAULT 'manual',
     fetched_at            TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS usage_detail (
     input_tokens          BIGINT      NOT NULL,
     output_tokens         BIGINT      NOT NULL,
     cache_creation_tokens BIGINT      NOT NULL,
+    cache_creation_1h_tokens BIGINT   NOT NULL DEFAULT 0,
     cache_read_tokens     BIGINT      NOT NULL,
     project_path          TEXT,
     backfill              BOOLEAN     NOT NULL DEFAULT FALSE,
@@ -73,6 +75,10 @@ CREATE TABLE IF NOT EXISTS usage_detail (
     PRIMARY KEY (message_id, request_id)
 );
 ALTER TABLE usage_detail ADD COLUMN IF NOT EXISTS tool TEXT NOT NULL DEFAULT 'claude-code';
+-- The 1h-TTL subset of cache_creation_tokens; rows predating it stay 0,
+-- which prices them exactly as before.
+ALTER TABLE usage_detail ADD COLUMN IF NOT EXISTS cache_creation_1h_tokens BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS cache_creation_1h_per_1m DOUBLE PRECISION NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_detail_user_ts ON usage_detail(user_id, ts);
 CREATE INDEX IF NOT EXISTS idx_detail_session ON usage_detail(session_id);
@@ -89,6 +95,7 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     input_tokens          BIGINT      NOT NULL DEFAULT 0,
     output_tokens         BIGINT      NOT NULL DEFAULT 0,
     cache_creation_tokens BIGINT      NOT NULL DEFAULT 0,
+    cache_creation_1h_tokens BIGINT   NOT NULL DEFAULT 0,
     cache_read_tokens     BIGINT      NOT NULL DEFAULT 0,
     messages              BIGINT      NOT NULL DEFAULT 0,
     first_ts              TIMESTAMPTZ,
@@ -96,18 +103,21 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (day, user_id, machine_id, tool, model)
 );
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS cache_creation_1h_tokens BIGINT NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_daily_day  ON usage_daily(day);
 CREATE INDEX IF NOT EXISTS idx_daily_user ON usage_daily(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_daily_tool ON usage_daily(tool, day);
 
 -- One-time bootstrap if daily is empty but detail has rows
 INSERT INTO usage_daily (day, user_id, machine_id, tool, model,
-    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-    messages, first_ts, last_ts)
+    input_tokens, output_tokens, cache_creation_tokens, cache_creation_1h_tokens,
+    cache_read_tokens, messages, first_ts, last_ts)
 SELECT (ts AT TIME ZONE 'UTC')::date,
        user_id, machine_id, tool, model,
        SUM(input_tokens), SUM(output_tokens),
-       SUM(cache_creation_tokens), SUM(cache_read_tokens),
+       SUM(cache_creation_tokens), SUM(cache_creation_1h_tokens),
+       SUM(cache_read_tokens),
        COUNT(*), MIN(ts), MAX(ts)
 FROM usage_detail
 WHERE NOT EXISTS (SELECT 1 FROM usage_daily LIMIT 1)

@@ -15,9 +15,14 @@ type UsageRecord struct {
 	InputTokens         int64     `json:"input_tokens"`
 	OutputTokens        int64     `json:"output_tokens"`
 	CacheCreationTokens int64     `json:"cache_creation_tokens"`
-	CacheReadTokens     int64     `json:"cache_read_tokens"`
-	ProjectPath         string    `json:"project_path,omitempty"`
-	Backfill            bool      `json:"backfill,omitempty"`
+	// CacheCreation1hTokens is the 1-hour-TTL subset of CacheCreationTokens
+	// (not an additional amount). Anthropic bills a 1h cache write at
+	// 2x base input vs 1.25x for the 5m default, so the server prices the
+	// subset at a premium. Tools that never write a 1h cache leave it 0.
+	CacheCreation1hTokens int64  `json:"cache_creation_1h_tokens,omitempty"`
+	CacheReadTokens       int64  `json:"cache_read_tokens"`
+	ProjectPath           string `json:"project_path,omitempty"`
+	Backfill              bool   `json:"backfill,omitempty"`
 }
 
 // EditRecord is one file-modification event (an Edit/Write/apply_patch

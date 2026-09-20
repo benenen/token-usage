@@ -70,6 +70,8 @@ WITH input AS (
         COALESCE((e->>'input_tokens')::bigint, 0)                 AS input_tokens,
         COALESCE((e->>'output_tokens')::bigint, 0)                AS output_tokens,
         COALESCE((e->>'cache_creation_tokens')::bigint, 0)        AS cache_creation_tokens,
+        LEAST(COALESCE((e->>'cache_creation_1h_tokens')::bigint, 0),
+              COALESCE((e->>'cache_creation_tokens')::bigint, 0))  AS cache_creation_1h_tokens,
         COALESCE((e->>'cache_read_tokens')::bigint, 0)            AS cache_read_tokens,
         NULLIF(e->>'project_path', '')                            AS project_path,
         COALESCE((e->>'backfill')::bool, false)                   AS backfill,
@@ -80,23 +82,25 @@ WITH input AS (
 ins AS (
     INSERT INTO usage_detail (
         message_id, request_id, session_id, user_id, machine_id, tool, model, ts,
-        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-        project_path, backfill, received_at)
+        input_tokens, output_tokens, cache_creation_tokens, cache_creation_1h_tokens,
+        cache_read_tokens, project_path, backfill, received_at)
     SELECT
         message_id, request_id, session_id, user_id, machine_id, tool, model, ts,
-        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-        project_path, backfill, received_at
+        input_tokens, output_tokens, cache_creation_tokens, cache_creation_1h_tokens,
+        cache_read_tokens, project_path, backfill, received_at
     FROM input
     ON CONFLICT (message_id, request_id) DO NOTHING
     RETURNING (ts AT TIME ZONE 'UTC')::date AS day,
               user_id, machine_id, tool, model,
-              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, ts
+              input_tokens, output_tokens, cache_creation_tokens,
+              cache_creation_1h_tokens, cache_read_tokens, ts
 ),
 agg AS (
     SELECT day, user_id, machine_id, tool, model,
            SUM(input_tokens)          AS in_t,
            SUM(output_tokens)         AS out_t,
            SUM(cache_creation_tokens) AS cc_t,
+           SUM(cache_creation_1h_tokens) AS cc1h_t,
            SUM(cache_read_tokens)     AS cr_t,
            COUNT(*)                   AS msgs,
            MIN(ts)                    AS mn,
@@ -106,14 +110,15 @@ agg AS (
 ),
 roll AS (
     INSERT INTO usage_daily (day, user_id, machine_id, tool, model,
-        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-        messages, first_ts, last_ts, updated_at)
-    SELECT day, user_id, machine_id, tool, model, in_t, out_t, cc_t, cr_t, msgs, mn, mx, NOW()
+        input_tokens, output_tokens, cache_creation_tokens, cache_creation_1h_tokens,
+        cache_read_tokens, messages, first_ts, last_ts, updated_at)
+    SELECT day, user_id, machine_id, tool, model, in_t, out_t, cc_t, cc1h_t, cr_t, msgs, mn, mx, NOW()
     FROM agg
     ON CONFLICT (day, user_id, machine_id, tool, model) DO UPDATE SET
         input_tokens          = usage_daily.input_tokens          + EXCLUDED.input_tokens,
         output_tokens         = usage_daily.output_tokens         + EXCLUDED.output_tokens,
         cache_creation_tokens = usage_daily.cache_creation_tokens + EXCLUDED.cache_creation_tokens,
+        cache_creation_1h_tokens = usage_daily.cache_creation_1h_tokens + EXCLUDED.cache_creation_1h_tokens,
         cache_read_tokens     = usage_daily.cache_read_tokens     + EXCLUDED.cache_read_tokens,
         messages              = usage_daily.messages              + EXCLUDED.messages,
         first_ts              = LEAST(usage_daily.first_ts,    EXCLUDED.first_ts),
@@ -291,9 +296,13 @@ type PriceRow struct {
 	InputPer1M    float64
 	OutputPer1M   float64
 	CacheCreate1M float64
-	CacheRead1M   float64
-	Source        string
-	FetchedAt     time.Time
+	// CacheCreate1h1M prices a 1-hour-TTL cache write. Only the premium
+	// over CacheCreate1M is charged on top, because the 1h tokens are a
+	// subset of cache_creation_tokens.
+	CacheCreate1h1M float64
+	CacheRead1M     float64
+	Source          string
+	FetchedAt       time.Time
 }
 
 // epoch is the synthetic valid_from used for "this price has been in
@@ -328,15 +337,16 @@ func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 	defer tx.Rollback(ctx)
 
 	var (
-		curIn, curOut, curCC, curCR float64
-		curSource                   string
-		found                       bool
+		curIn, curOut, curCC, curCC1h, curCR float64
+		curSource                            string
+		found                                bool
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT input_per_1m, output_per_1m, cache_creation_per_1m, cache_read_per_1m, source
+		SELECT input_per_1m, output_per_1m, cache_creation_per_1m,
+		       cache_creation_1h_per_1m, cache_read_per_1m, source
 		FROM model_prices
 		WHERE model_prefix = $1 AND valid_to IS NULL
-	`, p.ModelPrefix).Scan(&curIn, &curOut, &curCC, &curCR, &curSource)
+	`, p.ModelPrefix).Scan(&curIn, &curOut, &curCC, &curCC1h, &curCR, &curSource)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		found = false
@@ -346,7 +356,7 @@ func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 		found = true
 	}
 	if found && curIn == p.InputPer1M && curOut == p.OutputPer1M &&
-		curCC == p.CacheCreate1M && curCR == p.CacheRead1M {
+		curCC == p.CacheCreate1M && curCC1h == p.CacheCreate1h1M && curCR == p.CacheRead1M {
 		return false, nil
 	}
 	src := p.Source
@@ -359,11 +369,12 @@ func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE model_prices SET
 			    input_per_1m = $2, output_per_1m = $3,
-			    cache_creation_per_1m = $4, cache_read_per_1m = $5,
-			    source = $6, fetched_at = NOW()
+			    cache_creation_per_1m = $4, cache_creation_1h_per_1m = $5,
+			    cache_read_per_1m = $6,
+			    source = $7, fetched_at = NOW()
 			WHERE model_prefix = $1 AND valid_to IS NULL
 		`, p.ModelPrefix, p.InputPer1M, p.OutputPer1M,
-			p.CacheCreate1M, p.CacheRead1M, src); err != nil {
+			p.CacheCreate1M, p.CacheCreate1h1M, p.CacheRead1M, src); err != nil {
 			return false, err
 		}
 		return true, tx.Commit(ctx)
@@ -390,17 +401,19 @@ func (s *Store) UpsertPrice(ctx context.Context, p PriceRow) (bool, error) {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO model_prices
 		    (model_prefix, valid_from, input_per_1m, output_per_1m,
-		     cache_creation_per_1m, cache_read_per_1m, source, fetched_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		     cache_creation_per_1m, cache_creation_1h_per_1m,
+		     cache_read_per_1m, source, fetched_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 		ON CONFLICT (model_prefix, valid_from) DO UPDATE SET
 		    input_per_1m = EXCLUDED.input_per_1m,
 		    output_per_1m = EXCLUDED.output_per_1m,
 		    cache_creation_per_1m = EXCLUDED.cache_creation_per_1m,
+		    cache_creation_1h_per_1m = EXCLUDED.cache_creation_1h_per_1m,
 		    cache_read_per_1m = EXCLUDED.cache_read_per_1m,
 		    source = EXCLUDED.source,
 		    fetched_at = NOW()
 	`, p.ModelPrefix, from, p.InputPer1M, p.OutputPer1M,
-		p.CacheCreate1M, p.CacheRead1M, src); err != nil {
+		p.CacheCreate1M, p.CacheCreate1h1M, p.CacheRead1M, src); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
@@ -411,7 +424,7 @@ func (s *Store) ListActivePrices(ctx context.Context) ([]PriceRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT model_prefix, valid_from, valid_to,
 		       input_per_1m, output_per_1m,
-		       cache_creation_per_1m, cache_read_per_1m,
+		       cache_creation_per_1m, cache_creation_1h_per_1m, cache_read_per_1m,
 		       source, fetched_at
 		FROM model_prices
 		WHERE valid_to IS NULL
@@ -430,7 +443,7 @@ func (s *Store) ListPriceHistory(ctx context.Context, modelPrefix string) ([]Pri
 	rows, err := s.pool.Query(ctx, `
 		SELECT model_prefix, valid_from, valid_to,
 		       input_per_1m, output_per_1m,
-		       cache_creation_per_1m, cache_read_per_1m,
+		       cache_creation_per_1m, cache_creation_1h_per_1m, cache_read_per_1m,
 		       source, fetched_at
 		FROM model_prices
 		WHERE ($1 = '' OR model_prefix = $1)
@@ -449,7 +462,7 @@ func scanPriceRows(rows pgx.Rows) ([]PriceRow, error) {
 		var r PriceRow
 		if err := rows.Scan(&r.ModelPrefix, &r.ValidFrom, &r.ValidTo,
 			&r.InputPer1M, &r.OutputPer1M,
-			&r.CacheCreate1M, &r.CacheRead1M,
+			&r.CacheCreate1M, &r.CacheCreate1h1M, &r.CacheRead1M,
 			&r.Source, &r.FetchedAt); err != nil {
 			return nil, err
 		}
@@ -479,10 +492,11 @@ func (s *Store) SeedDefaultPrices(ctx context.Context, defaults map[string]Rate)
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO model_prices
 			    (model_prefix, valid_from, input_per_1m, output_per_1m,
-			     cache_creation_per_1m, cache_read_per_1m, source, fetched_at)
-			VALUES ($1, '1970-01-01 00:00:00+00', $2, $3, $4, $5, 'default-seed', NOW())
+			     cache_creation_per_1m, cache_creation_1h_per_1m,
+			     cache_read_per_1m, source, fetched_at)
+			VALUES ($1, '1970-01-01 00:00:00+00', $2, $3, $4, $5, $6, 'default-seed', NOW())
 			ON CONFLICT DO NOTHING
-		`, prefix, r.Input, r.Output, r.CacheCreation, r.CacheRead); err != nil {
+		`, prefix, r.Input, r.Output, r.CacheCreation, r.CacheCreation1h, r.CacheRead); err != nil {
 			return err
 		}
 	}
@@ -526,12 +540,13 @@ func rebuildDailyTx(ctx context.Context, tx pgx.Tx, from, to time.Time) (int64, 
 	}
 	res, err := tx.Exec(ctx, `
 		INSERT INTO usage_daily (day, user_id, machine_id, tool, model,
-		    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		    messages, first_ts, last_ts, updated_at)
+		    input_tokens, output_tokens, cache_creation_tokens, cache_creation_1h_tokens,
+		    cache_read_tokens, messages, first_ts, last_ts, updated_at)
 		SELECT (ts AT TIME ZONE 'UTC')::date,
 		       user_id, machine_id, tool, model,
 		       SUM(input_tokens), SUM(output_tokens),
-		       SUM(cache_creation_tokens), SUM(cache_read_tokens),
+		       SUM(cache_creation_tokens), SUM(cache_creation_1h_tokens),
+		       SUM(cache_read_tokens),
 		       COUNT(*), MIN(ts), MAX(ts), NOW()
 		FROM usage_detail
 		WHERE (ts AT TIME ZONE 'UTC')::date >= $1
@@ -545,16 +560,17 @@ func rebuildDailyTx(ctx context.Context, tx pgx.Tx, from, to time.Time) (int64, 
 }
 
 type AggRow struct {
-	Day      string
-	User     string
-	Tool     string
-	Model    string
-	Input    int64
-	Output   int64
-	CacheCC  int64
-	CacheRR  int64
-	Messages int64
-	Cost     float64 // time-aware cost computed in SQL using model_prices valid on Day
+	Day       string
+	User      string
+	Tool      string
+	Model     string
+	Input     int64
+	Output    int64
+	CacheCC   int64
+	CacheCC1h int64
+	CacheRR   int64
+	Messages  int64
+	Cost      float64 // time-aware cost computed in SQL using model_prices valid on Day
 }
 
 // Aggregate returns per-day per-user per-tool per-model token totals (UTC
@@ -570,6 +586,7 @@ SELECT to_char(d.day, 'YYYY-MM-DD')                       AS day_s,
        SUM(d.input_tokens),
        SUM(d.output_tokens),
        SUM(d.cache_creation_tokens),
+       SUM(d.cache_creation_1h_tokens),
        SUM(d.cache_read_tokens),
        SUM(d.messages),
        COALESCE(
@@ -579,11 +596,16 @@ SELECT to_char(d.day, 'YYYY-MM-DD')                       AS day_s,
        COALESCE(
          SUM(d.cache_creation_tokens * p.cache_creation_per_1m) / 1000000.0, 0) +
        COALESCE(
-         SUM(d.cache_read_tokens     * p.cache_read_per_1m    ) / 1000000.0, 0) AS cost_usd
+         SUM(d.cache_read_tokens     * p.cache_read_per_1m    ) / 1000000.0, 0) +
+       -- 1h writes were already priced at the 5m rate by the term above
+       -- (they are a subset), so only their premium is added here.
+       COALESCE(
+         SUM(d.cache_creation_1h_tokens *
+             GREATEST(p.cache_creation_1h_per_1m - p.cache_creation_per_1m, 0)) / 1000000.0, 0) AS cost_usd
 FROM usage_daily d
 LEFT JOIN LATERAL (
     SELECT mp.input_per_1m, mp.output_per_1m,
-           mp.cache_creation_per_1m, mp.cache_read_per_1m
+           mp.cache_creation_per_1m, mp.cache_creation_1h_per_1m, mp.cache_read_per_1m
     FROM model_prices mp
     WHERE d.model LIKE mp.model_prefix || '%'
       AND mp.valid_from <= (d.day::timestamptz + interval '1 day')
@@ -613,7 +635,7 @@ ORDER BY d.day DESC, d.user_id, d.tool, d.model
 	for rows.Next() {
 		var r AggRow
 		if err := rows.Scan(&r.Day, &r.User, &r.Tool, &r.Model,
-			&r.Input, &r.Output, &r.CacheCC, &r.CacheRR, &r.Messages, &r.Cost); err != nil {
+			&r.Input, &r.Output, &r.CacheCC, &r.CacheCC1h, &r.CacheRR, &r.Messages, &r.Cost); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -654,6 +676,7 @@ WITH agg AS (
            SUM(d.input_tokens)          AS in_t,
            SUM(d.output_tokens)         AS out_t,
            SUM(d.cache_creation_tokens) AS cc_t,
+           SUM(d.cache_creation_1h_tokens) AS cc1h_t,
            SUM(d.cache_read_tokens)     AS cr_t,
            COUNT(*)                     AS msgs
     FROM usage_detail d
@@ -670,11 +693,13 @@ SELECT EXTRACT(DOW FROM a.d_local)::int AS dow,
            (a.in_t  * COALESCE(p.input_per_1m,          0)
           + a.out_t * COALESCE(p.output_per_1m,         0)
           + a.cc_t  * COALESCE(p.cache_creation_per_1m, 0)
+          + a.cc1h_t * GREATEST(COALESCE(p.cache_creation_1h_per_1m, 0)
+                              - COALESCE(p.cache_creation_per_1m, 0), 0)
           + a.cr_t  * COALESCE(p.cache_read_per_1m,     0)) / 1000000.0), 0) AS cost
 FROM agg a
 LEFT JOIN LATERAL (
     SELECT mp.input_per_1m, mp.output_per_1m,
-           mp.cache_creation_per_1m, mp.cache_read_per_1m
+           mp.cache_creation_per_1m, mp.cache_creation_1h_per_1m, mp.cache_read_per_1m
     FROM model_prices mp
     WHERE a.model LIKE mp.model_prefix || '%'
       AND mp.valid_from <= (a.d_local::timestamptz + interval '1 day')

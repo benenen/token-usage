@@ -42,15 +42,27 @@ These are easy to break if you touch the wrong file:
 
 1. **`usage_daily` is maintained by the write path, not by a job.** The atomic upsert is a single CTE chain inside `store.go`'s `insertSQL` constant: detail `INSERT … ON CONFLICT DO NOTHING RETURNING` feeds `GROUP BY` feeds `usage_daily INSERT … ON CONFLICT … DO UPDATE SET col = col + EXCLUDED.col`. Only rows that actually inserted into detail get rolled into daily — dedup guarantees no double-counting. **Any schema change to either table must update that query in lockstep.** The same pattern (and the same rule) applies to `edit_detail`/`edit_daily` and `editInsertSQL` — code-edit events deduped on `event_id`, rolled up per `(day, user, machine, tool, lang)`.
 
-2. **Schema is the `const schema` string in `store.go`**, executed on every server startup; it must stay idempotent (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `DROP INDEX IF EXISTS`). There's a `DO $$ … ALTER TABLE usage RENAME TO usage_detail` block for v0.1 → v0.2 upgrades — keep that path working if you rename tables again.
+2. **`cache_creation_1h_tokens` is a subset of `cache_creation_tokens`, not
+   an addend.** Every cost query prices the full cache-creation total at the
+   5m rate and then adds *only* the 1h premium
+   (`GREATEST(cache_creation_1h_per_1m - cache_creation_per_1m, 0)`) for the
+   subset. There are two such queries — `Aggregate` and `ClockAggregate` —
+   plus the in-memory `Pricer.Cost` fallback in `api.go`; a new one must
+   follow the same shape or it will either double-charge the 1h tokens or
+   silently drop the premium. The watcher clamps the subset to the total and
+   so does `insertSQL`, so a self-contradicting transcript cannot overcharge.
+   Rollout note: `/ingest` uses `DisallowUnknownFields`, so the server has to
+   be deployed before watchers that send the field.
 
-3. **Dashboard JS must never use `innerHTML` with dynamic content.** A pre-tool-use security hook blocks Write/Edit calls that introduce `innerHTML` writes. `app.js` uses a tiny `el(tag, attrs, children)` helper plus `clear(node)` + `textContent` everywhere. If you add a new section, use the helper.
+3. **Schema is the `const schema` string in `store.go`**, executed on every server startup; it must stay idempotent (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, `DROP INDEX IF EXISTS`). There's a `DO $$ … ALTER TABLE usage RENAME TO usage_detail` block for v0.1 → v0.2 upgrades — keep that path working if you rename tables again.
 
-4. **Watcher identity is resolved server-side.** Don't reintroduce a `--user` flag on the watcher or a `user_id` field on `IngestRequest` — `user_id` comes exclusively from `ResolveAPIKey`. The watcher's `MachineID` auto-fills from `os.Hostname()`; there is no `--machine` flag.
+4. **Dashboard JS must never use `innerHTML` with dynamic content.** A pre-tool-use security hook blocks Write/Edit calls that introduce `innerHTML` writes. `app.js` uses a tiny `el(tag, attrs, children)` helper plus `clear(node)` + `textContent` everywhere. If you add a new section, use the helper.
 
-5. **Checkpoint advance semantics.** `cmd/watcher/main.go`'s `runOnce` only advances the checkpoint after **all** batches in a scan are durable (either 200-OK from server, or spooled to `--buffer`). On any failure it returns without saving, and the server dedups any rows that did make it through. Don't change this to per-batch advance without thinking about the failure mode.
+5. **Watcher identity is resolved server-side.** Don't reintroduce a `--user` flag on the watcher or a `user_id` field on `IngestRequest` — `user_id` comes exclusively from `ResolveAPIKey`. The watcher's `MachineID` auto-fills from `os.Hostname()`; there is no `--machine` flag.
 
-6. **`--dsn` works in three positions** for `admin`: as global flag (before subcommand), per-subcommand flag (after), or `$TOKENUSAGE_DSN`. This is intentional UX; `runAdmin` parses global flags with a `flag.ContinueOnError` set, then each subcommand re-declares `--dsn` defaulting to the global value.
+6. **Checkpoint advance semantics.** `cmd/watcher/main.go`'s `runOnce` only advances the checkpoint after **all** batches in a scan are durable (either 200-OK from server, or spooled to `--buffer`). On any failure it returns without saving, and the server dedups any rows that did make it through. Don't change this to per-batch advance without thinking about the failure mode.
+
+7. **`--dsn` works in three positions** for `admin`: as global flag (before subcommand), per-subcommand flag (after), or `$TOKENUSAGE_DSN`. This is intentional UX; `runAdmin` parses global flags with a `flag.ContinueOnError` set, then each subcommand re-declares `--dsn` defaulting to the global value.
 
 ## Adding a new tool source
 

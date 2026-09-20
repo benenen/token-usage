@@ -41,6 +41,7 @@ Two tables, both managed automatically by the server on first start.
 | `model`                  | full model name as Claude Code reported it                       |
 | `ts`                     | message timestamp                                                |
 | `input_tokens`, `output_tokens`, `cache_creation_tokens`, `cache_read_tokens` | raw counts; pricing happens at read time |
+| `cache_creation_1h_tokens` | the 1h-TTL **subset** of `cache_creation_tokens` (not an extra amount) — it bills at a premium |
 | `project_path`           | last path segment of the JSONL directory                         |
 | `backfill`               | `true` if the record was older than `--backfill-cutoff` at scan  |
 | `received_at`            | server clock at insert                                           |
@@ -274,10 +275,26 @@ How the table gets populated:
 
    ```json
    {
-     "claude-opus-4":   {"input": 15, "output": 75, "cache_creation": 18.75, "cache_read": 1.50},
-     "claude-sonnet-4": {"input":  3, "output": 15, "cache_creation":  3.75, "cache_read": 0.30}
+     "claude-opus-4":   {"input": 15, "output": 75, "cache_creation": 18.75, "cache_creation_1h": 30, "cache_read": 1.50},
+     "claude-sonnet-4": {"input":  3, "output": 15, "cache_creation":  3.75, "cache_creation_1h":  6, "cache_read": 0.30}
    }
    ```
+
+### The 1-hour cache tier
+
+Anthropic bills a cache **write** at 1.25x base input for the default 5m
+TTL and 2x for the 1h TTL. Claude Code reports the split per message
+(`usage.cache_creation.ephemeral_{5m,1h}_input_tokens`); the watcher ships
+the 1h part as `cache_creation_1h_tokens` and `/summary` adds only the
+*premium* over the 5m rate for those tokens — so a row whose 1h count is 0
+prices exactly as before. Rates come from LiteLLM's
+`cache_creation_input_token_cost_above_1hr`; models without one carry no
+premium. With a 1h-TTL session (Claude Code's default for long sessions),
+pricing the whole write at the 5m rate under-reports the day by ~11%.
+
+> **Rollout order:** `/ingest` rejects unknown fields, so upgrade the
+> **server before the watchers** — an old server 400s a batch carrying
+> `cache_creation_1h_tokens`.
 
 The dashboard's price-history modal (click a model name) renders the
 full `valid_from / valid_to` chain per prefix.

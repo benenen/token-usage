@@ -13,7 +13,11 @@ type Rate struct {
 	Input         float64 `json:"input"`
 	Output        float64 `json:"output"`
 	CacheCreation float64 `json:"cache_creation"`
-	CacheRead     float64 `json:"cache_read"`
+	// CacheCreation1h prices a 1-hour-TTL cache write (Anthropic: 2x
+	// input, vs 1.25x for the 5m default). Zero means "no 1h tier" —
+	// the 5m rate then applies to every write.
+	CacheCreation1h float64 `json:"cache_creation_1h"`
+	CacheRead       float64 `json:"cache_read"`
 }
 
 // DefaultRates returns a copy of the in-memory price table used as the
@@ -33,22 +37,22 @@ func DefaultRates() map[string]Rate {
 // CacheCreation=0 for OpenAI: their prompt cache has no write-time charge.
 var defaultRates = map[string]Rate{
 	// Anthropic
-	"claude-opus-4":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheRead: 1.50},
-	"claude-sonnet-4":   {Input: 3, Output: 15, CacheCreation: 3.75, CacheRead: 0.30},
-	"claude-haiku-4":    {Input: 1, Output: 5, CacheCreation: 1.25, CacheRead: 0.10},
-	"claude-3-5-sonnet": {Input: 3, Output: 15, CacheCreation: 3.75, CacheRead: 0.30},
-	"claude-3-5-haiku":  {Input: 0.80, Output: 4, CacheCreation: 1.00, CacheRead: 0.08},
-	"claude-3-opus":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheRead: 1.50},
-	"claude-3-haiku":    {Input: 0.25, Output: 1.25, CacheCreation: 0.30, CacheRead: 0.03},
+	"claude-opus-4":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheCreation1h: 30, CacheRead: 1.50},
+	"claude-sonnet-4":   {Input: 3, Output: 15, CacheCreation: 3.75, CacheCreation1h: 6, CacheRead: 0.30},
+	"claude-haiku-4":    {Input: 1, Output: 5, CacheCreation: 1.25, CacheCreation1h: 2, CacheRead: 0.10},
+	"claude-3-5-sonnet": {Input: 3, Output: 15, CacheCreation: 3.75, CacheCreation1h: 6, CacheRead: 0.30},
+	"claude-3-5-haiku":  {Input: 0.80, Output: 4, CacheCreation: 1.00, CacheCreation1h: 1.6, CacheRead: 0.08},
+	"claude-3-opus":     {Input: 15, Output: 75, CacheCreation: 18.75, CacheCreation1h: 30, CacheRead: 1.50},
+	"claude-3-haiku":    {Input: 0.25, Output: 1.25, CacheCreation: 0.30, CacheCreation1h: 0.5, CacheRead: 0.03},
 
 	// OpenAI
-	"gpt-5":         {Input: 3, Output: 15, CacheCreation: 0, CacheRead: 0.30}, // approximate — override per your contract
-	"gpt-5-mini":    {Input: 0.30, Output: 1.20, CacheCreation: 0, CacheRead: 0.03},
-	"gpt-4o":        {Input: 2.50, Output: 10, CacheCreation: 0, CacheRead: 1.25},
-	"gpt-4o-mini":   {Input: 0.15, Output: 0.60, CacheCreation: 0, CacheRead: 0.075},
-	"gpt-4-turbo":   {Input: 10, Output: 30, CacheCreation: 0, CacheRead: 0},
-	"gpt-4":         {Input: 30, Output: 60, CacheCreation: 0, CacheRead: 0},
-	"gpt-3.5":       {Input: 0.50, Output: 1.50, CacheCreation: 0, CacheRead: 0},
+	"gpt-5":       {Input: 3, Output: 15, CacheCreation: 0, CacheRead: 0.30}, // approximate — override per your contract
+	"gpt-5-mini":  {Input: 0.30, Output: 1.20, CacheCreation: 0, CacheRead: 0.03},
+	"gpt-4o":      {Input: 2.50, Output: 10, CacheCreation: 0, CacheRead: 1.25},
+	"gpt-4o-mini": {Input: 0.15, Output: 0.60, CacheCreation: 0, CacheRead: 0.075},
+	"gpt-4-turbo": {Input: 10, Output: 30, CacheCreation: 0, CacheRead: 0},
+	"gpt-4":       {Input: 30, Output: 60, CacheCreation: 0, CacheRead: 0},
+	"gpt-3.5":     {Input: 0.50, Output: 1.50, CacheCreation: 0, CacheRead: 0},
 }
 
 type Pricer struct {
@@ -90,8 +94,10 @@ func (p *Pricer) reindex() {
 }
 
 // Cost returns USD for the given token counts under the given model.
-// Returns 0 if no matching rate exists (caller can flag as unknown model).
-func (p *Pricer) Cost(model string, in, out, cc, cr int64) float64 {
+// cc1h is the 1-hour-TTL subset of cc (already counted in it), charged
+// the premium of the 1h rate over the 5m one. Returns 0 if no matching
+// rate exists (caller can flag as unknown model).
+func (p *Pricer) Cost(model string, in, out, cc, cc1h, cr int64) float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	r, ok := p.rates[model]
@@ -108,8 +114,13 @@ func (p *Pricer) Cost(model string, in, out, cc, cr int64) float64 {
 		return 0
 	}
 	const per = 1_000_000.0
+	premium1h := r.CacheCreation1h - r.CacheCreation
+	if premium1h < 0 {
+		premium1h = 0
+	}
 	return float64(in)*r.Input/per +
 		float64(out)*r.Output/per +
 		float64(cc)*r.CacheCreation/per +
+		float64(cc1h)*premium1h/per +
 		float64(cr)*r.CacheRead/per
 }

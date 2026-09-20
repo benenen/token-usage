@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-
 // DefaultPriceSourceURL is the LiteLLM-maintained per-token price table.
 // It's the de-facto source for Claude Code and ccusage too, updated
 // reasonably promptly when Anthropic / OpenAI change list prices.
@@ -22,12 +21,13 @@ const DefaultPriceSourceURL = "https://raw.githubusercontent.com/BerriAI/litellm
 // JSON. Pointers so we can tell "missing" from "zero" — many entries
 // omit cache pricing entirely.
 type liteLLMEntry struct {
-	InputCostPerToken         *float64 `json:"input_cost_per_token"`
-	OutputCostPerToken        *float64 `json:"output_cost_per_token"`
-	CacheCreationCostPerToken *float64 `json:"cache_creation_input_token_cost"`
-	CacheReadCostPerToken     *float64 `json:"cache_read_input_token_cost"`
-	LiteLLMProvider           string   `json:"litellm_provider"`
-	Mode                      string   `json:"mode"`
+	InputCostPerToken           *float64 `json:"input_cost_per_token"`
+	OutputCostPerToken          *float64 `json:"output_cost_per_token"`
+	CacheCreationCostPerToken   *float64 `json:"cache_creation_input_token_cost"`
+	CacheCreation1hCostPerToken *float64 `json:"cache_creation_input_token_cost_above_1hr"`
+	CacheReadCostPerToken       *float64 `json:"cache_read_input_token_cost"`
+	LiteLLMProvider             string   `json:"litellm_provider"`
+	Mode                        string   `json:"mode"`
 }
 
 // PriceSyncMaxAttempts and PriceSyncInitialBackoff bound the retry loop
@@ -35,9 +35,9 @@ type liteLLMEntry struct {
 // the worker still re-attempts next tick — these handle transient blips
 // (DNS hiccup, CDN 5xx) within a single sync cycle.
 const (
-	PriceSyncMaxAttempts     = 10
-	PriceSyncInitialBackoff  = 1 * time.Second
-	PriceSyncMaxBackoff      = 30 * time.Second
+	PriceSyncMaxAttempts    = 10
+	PriceSyncInitialBackoff = 1 * time.Second
+	PriceSyncMaxBackoff     = 30 * time.Second
 )
 
 // SyncPrices fetches the LiteLLM table (with retry), filters to any
@@ -97,13 +97,14 @@ func SyncPrices(ctx context.Context, store *Store, sourceURL string, client *htt
 	considered = len(chosen)
 	for prefix, c := range chosen {
 		row := PriceRow{
-			ModelPrefix:   prefix,
-			ValidFrom:     time.Now(),
-			InputPer1M:    *c.entry.InputCostPerToken * 1e6,
-			OutputPer1M:   *c.entry.OutputCostPerToken * 1e6,
-			CacheCreate1M: derefFloat(c.entry.CacheCreationCostPerToken) * 1e6,
-			CacheRead1M:   derefFloat(c.entry.CacheReadCostPerToken) * 1e6,
-			Source:        "litellm:" + c.source,
+			ModelPrefix:     prefix,
+			ValidFrom:       time.Now(),
+			InputPer1M:      *c.entry.InputCostPerToken * 1e6,
+			OutputPer1M:     *c.entry.OutputCostPerToken * 1e6,
+			CacheCreate1M:   derefFloat(c.entry.CacheCreationCostPerToken) * 1e6,
+			CacheCreate1h1M: derefFloat(c.entry.CacheCreation1hCostPerToken) * 1e6,
+			CacheRead1M:     derefFloat(c.entry.CacheReadCostPerToken) * 1e6,
+			Source:          "litellm:" + c.source,
 		}
 		didChange, uerr := store.UpsertPrice(ctx, row)
 		if uerr != nil {
@@ -112,8 +113,9 @@ func SyncPrices(ctx context.Context, store *Store, sourceURL string, client *htt
 		}
 		if didChange {
 			changed++
-			log.Printf("pricesync: %s → in=%.4f out=%.4f cw=%.4f cr=%.4f (per 1M)",
-				prefix, row.InputPer1M, row.OutputPer1M, row.CacheCreate1M, row.CacheRead1M)
+			log.Printf("pricesync: %s → in=%.4f out=%.4f cw=%.4f cw1h=%.4f cr=%.4f (per 1M)",
+				prefix, row.InputPer1M, row.OutputPer1M, row.CacheCreate1M,
+				row.CacheCreate1h1M, row.CacheRead1M)
 		}
 	}
 	return considered, changed, nil
@@ -190,10 +192,11 @@ func derefFloat(p *float64) float64 {
 // normalizeModel strips provider prefixes and trailing version-date
 // suffixes so LiteLLM keys collapse into a stable family identifier that
 // matches the model strings Claude Code / Codex actually emit.
-//   "anthropic/claude-3-5-sonnet-20241022"  -> "claude-3-5-sonnet"
-//   "claude-opus-4-1-20250805"              -> "claude-opus-4-1"
-//   "gpt-4o-2024-08-06"                     -> "gpt-4o"
-//   "gpt-4o"                                -> "gpt-4o"
+//
+//	"anthropic/claude-3-5-sonnet-20241022"  -> "claude-3-5-sonnet"
+//	"claude-opus-4-1-20250805"              -> "claude-opus-4-1"
+//	"gpt-4o-2024-08-06"                     -> "gpt-4o"
+//	"gpt-4o"                                -> "gpt-4o"
 func normalizeModel(s string) string {
 	if i := strings.IndexByte(s, '/'); i >= 0 {
 		s = s[i+1:]

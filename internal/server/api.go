@@ -99,17 +99,20 @@ func extractBearer(h string) string {
 }
 
 type summaryRow struct {
-	Day      string  `json:"day"`
-	User     string  `json:"user"`
-	Tool     string  `json:"tool"`
-	Model    string  `json:"model"`
-	Input    int64   `json:"input_tokens"`
-	Output   int64   `json:"output_tokens"`
-	CacheCC  int64   `json:"cache_creation_tokens"`
-	CacheRR  int64   `json:"cache_read_tokens"`
-	Total    int64   `json:"total_tokens"` // derived: input + output + cache_creation + cache_read
-	Messages int64   `json:"messages"`
-	Cost     float64 `json:"cost_usd"`
+	Day     string `json:"day"`
+	User    string `json:"user"`
+	Tool    string `json:"tool"`
+	Model   string `json:"model"`
+	Input   int64  `json:"input_tokens"`
+	Output  int64  `json:"output_tokens"`
+	CacheCC int64  `json:"cache_creation_tokens"`
+	// CacheCC1h is the 1h-TTL subset of CacheCC, not an extra amount —
+	// it is deliberately absent from Total.
+	CacheCC1h int64   `json:"cache_creation_1h_tokens,omitempty"`
+	CacheRR   int64   `json:"cache_read_tokens"`
+	Total     int64   `json:"total_tokens"` // derived: input + output + cache_creation + cache_read
+	Messages  int64   `json:"messages"`
+	Cost      float64 `json:"cost_usd"`
 }
 
 func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -136,20 +139,21 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 		// the next litellm sync, or a custom Codex variant).
 		cost := row.Cost
 		if cost == 0 {
-			cost = a.Pricer.Cost(row.Model, row.Input, row.Output, row.CacheCC, row.CacheRR)
+			cost = a.Pricer.Cost(row.Model, row.Input, row.Output, row.CacheCC, row.CacheCC1h, row.CacheRR)
 		}
 		out = append(out, summaryRow{
-			Day:      row.Day,
-			User:     row.User,
-			Tool:     row.Tool,
-			Model:    row.Model,
-			Input:    row.Input,
-			Output:   row.Output,
-			CacheCC:  row.CacheCC,
-			CacheRR:  row.CacheRR,
-			Total:    row.Input + row.Output + row.CacheCC + row.CacheRR,
-			Messages: row.Messages,
-			Cost:     cost,
+			Day:       row.Day,
+			User:      row.User,
+			Tool:      row.Tool,
+			Model:     row.Model,
+			Input:     row.Input,
+			Output:    row.Output,
+			CacheCC:   row.CacheCC,
+			CacheCC1h: row.CacheCC1h,
+			CacheRR:   row.CacheRR,
+			Total:     row.Input + row.Output + row.CacheCC + row.CacheRR,
+			Messages:  row.Messages,
+			Cost:      cost,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -271,14 +275,15 @@ func (a *API) handleUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 type priceView struct {
-	Model         string  `json:"model_prefix"`
-	ValidFrom     string  `json:"valid_from"`
-	ValidTo       string  `json:"valid_to,omitempty"`
-	InputPer1M    float64 `json:"input_per_1m"`
-	OutputPer1M   float64 `json:"output_per_1m"`
-	CacheCreate1M float64 `json:"cache_creation_per_1m"`
-	CacheRead1M   float64 `json:"cache_read_per_1m"`
-	Source        string  `json:"source"`
+	Model           string  `json:"model_prefix"`
+	ValidFrom       string  `json:"valid_from"`
+	ValidTo         string  `json:"valid_to,omitempty"`
+	InputPer1M      float64 `json:"input_per_1m"`
+	OutputPer1M     float64 `json:"output_per_1m"`
+	CacheCreate1M   float64 `json:"cache_creation_per_1m"`
+	CacheCreate1h1M float64 `json:"cache_creation_1h_per_1m,omitempty"`
+	CacheRead1M     float64 `json:"cache_read_per_1m"`
+	Source          string  `json:"source"`
 }
 
 // /prices?model=<prefix>&active=1
@@ -313,14 +318,15 @@ func (a *API) handlePrices(w http.ResponseWriter, r *http.Request) {
 			to = p.ValidTo.UTC().Format(time.RFC3339)
 		}
 		out = append(out, priceView{
-			Model:         p.ModelPrefix,
-			ValidFrom:     p.ValidFrom.UTC().Format(time.RFC3339),
-			ValidTo:       to,
-			InputPer1M:    p.InputPer1M,
-			OutputPer1M:   p.OutputPer1M,
-			CacheCreate1M: p.CacheCreate1M,
-			CacheRead1M:   p.CacheRead1M,
-			Source:        p.Source,
+			Model:           p.ModelPrefix,
+			ValidFrom:       p.ValidFrom.UTC().Format(time.RFC3339),
+			ValidTo:         to,
+			InputPer1M:      p.InputPer1M,
+			OutputPer1M:     p.OutputPer1M,
+			CacheCreate1M:   p.CacheCreate1M,
+			CacheCreate1h1M: p.CacheCreate1h1M,
+			CacheRead1M:     p.CacheRead1M,
+			Source:          p.Source,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
