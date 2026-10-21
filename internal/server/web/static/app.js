@@ -29,6 +29,7 @@
   const TOOL_COLORS = {
     "claude-code": "#ff5c1a",
     "codex":       "#74aa9c",  // OpenAI mint
+    "astron-code": "#3a7bd5",
     "opencode":    "#a1a5e8",
     "pi":          "#d96e9a",
   };

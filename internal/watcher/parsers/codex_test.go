@@ -270,3 +270,38 @@ func TestCodexExecHeredocPatchEmitsEdits(t *testing.T) {
 		t.Errorf("edit = %+v, want python +2", e)
 	}
 }
+
+// astron-code records its edit/write tools as plain function calls whose
+// structured result arrives in a patch_apply_end event. Failed applies
+// are skipped; an add counts every content line.
+const astronFixture = `{"timestamp":"2026-10-21T06:19:46.720Z","type":"session_meta","payload":{"id":"01a15d1d-61bd-78d2-a371-8e667aacf9de","originator":"astron-code-tui"}}
+{"timestamp":"2026-10-21T06:19:46.745Z","type":"turn_context","payload":{"model":"spark-x2.6"}}
+{"timestamp":"2026-10-21T06:20:00.000Z","type":"response_item","payload":{"type":"function_call","name":"edit","call_id":"call_e","arguments":"{}"}}
+{"timestamp":"2026-10-21T06:20:01.000Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call_e","success":true,"changes":{"/w/b.sh":{"type":"update","unified_diff":"--- /w/b.sh\n+++ /w/b.sh\n@@ -1,2 +1,3 @@\n a\n-b\n+c\n+d\n","move_path":null},"/w/a.py":{"type":"add","content":"x\ny\n"}}}}
+{"timestamp":"2026-10-21T06:20:02.000Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call_bad","success":false,"changes":{"/w/c.go":{"type":"add","content":"z\n"}}}}
+{"timestamp":"2026-10-21T06:20:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":19302,"cached_input_tokens":3328,"output_tokens":136,"reasoning_output_tokens":0}}}}
+`
+
+func TestAstronCodePatchApplyEndEmitsEdits(t *testing.T) {
+	path := writeFixture(t, "rollout-2026-10-21T14-19-29-01a15d1d-61bd-78d2-a371-8e667aacf9de.jsonl", astronFixture)
+	now := time.Date(2026, 10, 21, 7, 0, 0, 0, time.UTC)
+
+	res, _, err := For("astron-code").Scan(path, "astron-code", FileState{}, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Usage) != 1 || res.Usage[0].Model != "spark-x2.6" || res.Usage[0].Tool != "astron-code" {
+		t.Fatalf("usage = %+v, want one spark-x2.6 astron-code record", res.Usage)
+	}
+	if len(res.Edits) != 2 {
+		t.Fatalf("edits = %d, want 2 (failed apply skipped): %+v", len(res.Edits), res.Edits)
+	}
+	// Paths are sorted, so a.py is #0 and b.sh is #1 on every scan.
+	a, b := res.Edits[0], res.Edits[1]
+	if a.EventID != "call_e#0" || a.Lang != "python" || a.LinesAdded != 2 || a.LinesRemoved != 0 {
+		t.Errorf("edit[0] = %+v, want call_e#0 python +2/-0", a)
+	}
+	if b.EventID != "call_e#1" || b.Lang != "shell" || b.LinesAdded != 2 || b.LinesRemoved != 1 {
+		t.Errorf("edit[1] = %+v, want call_e#1 shell +2/-1", b)
+	}
+}

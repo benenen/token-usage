@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,13 @@ import (
 // dedups records on every re-send.
 type codexParser struct{}
 
-func init() { register("codex", codexParser{}) }
+// astron-code writes the same rollout format under ~/.acode/sessions, so it shares this parser. Its
+// file edits come through edit/write function calls rather than
+// apply_patch; those land via the patch_apply_end events handled below.
+func init() {
+	register("codex", codexParser{})
+	register("astron-code", codexParser{})
+}
 
 func (codexParser) Scan(path, tool string, prev FileState, backfillCutoff time.Duration, now time.Time) (ScanResult, FileState, error) {
 	info, err := os.Stat(path)
@@ -213,6 +220,10 @@ func emitCodexLine(line []byte, st *codexScanState, tool string, backfillCutoff 
 		if json.Unmarshal(l.Payload, &tc) != nil {
 			return
 		}
+		if tc.Type == "patch_apply_end" {
+			st.addPatchApplyEnd(l)
+			return
+		}
 		if tc.Type != "token_count" || tc.Info == nil || tc.Info.TotalTokenUsage == nil {
 			return
 		}
@@ -266,6 +277,62 @@ func emitCodexLine(line []byte, st *codexScanState, tool string, backfillCutoff 
 			ProjectPath:         st.project,
 			Backfill:            backfill,
 		})
+	}
+}
+
+// codexPatchApplyEnd is the structured result of an applied edit. Each
+// change is either {type:"add", content} or {type:"update", unified_diff,
+// move_path}; deletes carry nothing worth counting.
+type codexPatchApplyEnd struct {
+	CallID  string `json:"call_id"`
+	Success bool   `json:"success"`
+	Changes map[string]struct {
+		Type        string  `json:"type"`
+		Content     string  `json:"content"`
+		UnifiedDiff string  `json:"unified_diff"`
+		MovePath    *string `json:"move_path"`
+	} `json:"changes"`
+}
+
+// addPatchApplyEnd records the files of a successful patch_apply_end.
+// astron-code persists these for its edit/write tools; upstream codex does
+// not, but if it ever does, a call already counted from its apply_patch
+// envelope is skipped so its lines are not counted twice.
+func (st *codexScanState) addPatchApplyEnd(l codexLine) {
+	var ev codexPatchApplyEnd
+	if json.Unmarshal(l.Payload, &ev) != nil || !ev.Success || ev.CallID == "" {
+		return
+	}
+	for _, p := range st.patches {
+		if p.callID == ev.CallID {
+			return
+		}
+	}
+	paths := make([]string, 0, len(ev.Changes))
+	for p := range ev.Changes {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths) // map order is random; EventID indexes must be stable
+	var files []codexFilePatch
+	for _, p := range paths {
+		c := ev.Changes[p]
+		fp := codexFilePatch{path: p}
+		switch c.Type {
+		case "add":
+			fp.added = int64(strings.Count(strings.TrimSuffix(c.Content, "\n"), "\n") + 1)
+		case "update":
+			if c.MovePath != nil && *c.MovePath != "" {
+				fp.path = *c.MovePath
+			}
+			fp.added, fp.removed = diffLineCounts(strings.Split(c.UnifiedDiff, "\n"))
+		default:
+			continue
+		}
+		files = append(files, fp)
+	}
+	if len(files) > 0 {
+		st.patches = append(st.patches, codexPatchCall{callID: ev.CallID, ts: l.Timestamp, files: files})
+		st.patchOK[ev.CallID] = true
 	}
 }
 
