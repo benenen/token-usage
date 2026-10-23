@@ -25,6 +25,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/summary", a.handleSummary)
 	mux.HandleFunc("/langs", a.handleLangs)
 	mux.HandleFunc("/clock", a.handleClock)
+	mux.HandleFunc("/activity", a.handleActivity)
 	mux.HandleFunc("/users", a.handleUsers)
 	mux.HandleFunc("/prices", a.handlePrices)
 	mux.HandleFunc("/healthz", a.handleHealth)
@@ -238,6 +239,39 @@ func (a *API) handleClock(w http.ResponseWriter, r *http.Request) {
 			Messages: row.Messages,
 			Cost:     row.Cost,
 		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+type activityRow struct {
+	Day      string `json:"day"`
+	Tokens   int64  `json:"total_tokens"` // input + output + cache_creation + cache_read
+	Messages int64  `json:"messages"`
+}
+
+// /activity?user=&from=&to=
+//
+// Per-day token totals (UTC days) for the dashboard's calendar heatmap, read
+// from usage_daily. Independent of the range picker, so the heatmap can show
+// a full year while /summary only fetches the selected range. Open like
+// /summary.
+func (a *API) handleActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	rows, err := a.Store.ActivityAggregate(r.Context(), q.Get("user"),
+		parseTime(q.Get("from")), parseTime(q.Get("to")))
+	if err != nil {
+		log.Printf("activity aggregate error: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]activityRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, activityRow{Day: row.Day, Tokens: row.Tokens, Messages: row.Messages})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

@@ -145,3 +145,35 @@ func TestRebuildDailyOnlyTouchesRequestedUTCDays(t *testing.T) {
 		}
 	}
 }
+
+func TestActivityAggregateSumsTokensPerDay(t *testing.T) {
+	store := openRepairTestStore(t)
+	seedQueryTestData(t, store)
+	ctx := context.Background()
+
+	rows, err := store.ActivityAggregate(ctx, "", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ActivityRow{
+		{Day: "2026-08-03", Tokens: 2_000_000, Messages: 2},
+		{Day: "2026-08-06", Tokens: 4_000_000, Messages: 3}, // 1h tokens are a subset, not added
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("got %+v, want %+v", rows, want)
+	}
+	for i := range want {
+		if rows[i] != want[i] {
+			t.Errorf("row %d = %+v, want %+v", i, rows[i], want[i])
+		}
+	}
+
+	rows, err = store.ActivityAggregate(ctx, "nobody", time.Time{}, time.Time{})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("unknown user: rows=%+v err=%v", rows, err)
+	}
+	rows, err = store.ActivityAggregate(ctx, "user", time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC), time.Time{})
+	if err != nil || len(rows) != 1 || rows[0].Day != "2026-08-06" {
+		t.Fatalf("from filter: rows=%+v err=%v", rows, err)
+	}
+}

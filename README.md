@@ -158,13 +158,14 @@ a sortable ledger, and an at-a-glance daily cost chart broken down by model.
 | POST   | `/ingest`   | Bearer key    | Batch usage records and/or edit events from a watcher.    |
 | GET    | `/summary`  | open          | Per-day per-user per-model totals + cost.                 |
 | GET    | `/langs`    | open          | Per-day per-user per-tool per-language code-edit stats.   |
+| GET    | `/activity` | open          | Per-day token totals (all models), for the year heatmap.  |
 | GET    | `/users`    | open          | List of registered users.                                 |
 | GET    | `/prices`   | open          | Active model prices + per-prefix history (LiteLLM-synced).|
 | GET    | `/healthz`  | open          | Liveness probe.                                           |
 | GET    | `/`         | open          | Embedded dashboard (HTML/CSS/JS).                         |
 | GET    | `/static/*` | open          | Dashboard CSS / JS.                                       |
 
-`/summary` and `/langs` accept `?user=<id>&from=<RFC3339 | unix>&to=<…>`. Empty params mean no filter.
+`/summary`, `/langs` and `/activity` accept `?user=<id>&from=<RFC3339 | unix>&to=<…>`. Empty params mean no filter.
 
 Note on upgrades: edit events ride in a separate `/ingest` request from usage
 records, so an upgraded watcher keeps working against a pre-`/langs` server

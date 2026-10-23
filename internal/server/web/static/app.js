@@ -119,6 +119,7 @@
     rows: [],
     clock: [],          // /clock rows: per-(dow,hour) totals in the browser's tz
     langs: [],          // /langs rows: per-(day,user,tool,lang) edit stats
+    activity: [],       // /activity rows: per-day token totals for the year heatmap
     users: [],          // registered users (from /users); may include zero-data users
     prices: null,       // /prices history, lazily loaded on first modal open
     sortKey: "day",
@@ -232,6 +233,15 @@
       .then(r => r.ok ? r.json() : [])
       .then(l => { state.langs = l || []; renderLangs(); })
       .catch(e => console.warn("/langs fetch failed (non-fatal)", e));
+    // /activity feeds the year heatmap, which always spans 53 weeks no
+    // matter what the range picker says — only the user filter applies.
+    const actParams = new URLSearchParams();
+    if (state.user) actParams.set("user", state.user);
+    actParams.set("from", heatmapStart().toISOString());
+    fetch("/activity?" + actParams.toString(), { headers: { accept: "application/json" }})
+      .then(r => r.ok ? r.json() : [])
+      .then(a => { state.activity = a || []; renderHeatmap(); })
+      .catch(e => console.warn("/activity fetch failed (non-fatal)", e));
     // Fire /users in the background — it can be 20s+ during heavy /ingest
     // (pool saturation), and the dashboard's main content doesn't need it.
     // When it arrives, just refresh the USER dropdown.
@@ -298,7 +308,7 @@
     renderLegend(byModel);
     renderBars(byDay, byModel);
     renderSpike(densify(byDay, state.rangeDays));
-    renderHeatmap(byDay);
+    renderHeatmap();
     renderClock();
     renderRank(els.modelRank, byModel, "model");
     renderRank(els.userRank, byUser, "none");
@@ -314,7 +324,7 @@
     [els.totalIn, els.totalOut, els.totalCw, els.totalCr, els.totalTok, els.totalMsgs].forEach(e => e.textContent = "—");
     clear(els.legend); clear(els.svg); clear(els.yaxis);
     clear(els.modelRank); clear(els.userRank); clear(els.toolRank); clear(els.ledgerBody);
-    renderHeatmap([]);
+    renderHeatmap();
     clear(els.clockHeatmap);
     els.heroSavings.textContent = "";
     clear(els.heroForecast);
@@ -639,7 +649,8 @@
 
   // ---- heatmap (GitHub-style year activity) -------------------------------
   // Always renders a 53-week × 7-day grid ending today (UTC), regardless of
-  // the range picker. Cells outside state.rows just stay at level 0.
+  // the range picker, from state.activity (/activity). Days without usage
+  // stay at level 0.
   const HEATMAP_COLORS = ["#1a212c", "#3a2a1d", "#7a3a1d", "#c64b1a", "#ff5c1a"];
   const HEATMAP_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const HEATMAP_DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""]; // Sun..Sat
@@ -653,10 +664,20 @@
     return 4;
   }
 
-  function renderHeatmap(byDay) {
+  const HEATMAP_WEEKS = 53;
+
+  // First (top-left, Sunday) cell of the grid, in UTC.
+  function heatmapStart() {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    d.setUTCDate(d.getUTCDate() - (HEATMAP_WEEKS - 1) * 7 - d.getUTCDay());
+    return d;
+  }
+
+  function renderHeatmap() {
     const svgEl = els.heatmap;
     clear(svgEl);
-    const weeks = 53, days = 7;
+    const weeks = HEATMAP_WEEKS, days = 7;
     const cell = 12, gap = 3;
     const step = cell + gap;
     const padL = 30, padT = 18, padR = 4, padB = 4;
@@ -664,7 +685,7 @@
     const H = padT + days * step + padB;
     svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
 
-    const byDayMap = new Map(byDay.map(d => [d.day, d.totalTokens]));
+    const byDayMap = new Map(state.activity.map(d => [d.day, d.total_tokens]));
 
     // Color-scale anchor: use the 95th percentile of non-zero days so a
     // single outlier doesn't squash every other day into level 1.

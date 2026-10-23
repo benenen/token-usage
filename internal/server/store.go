@@ -287,6 +287,54 @@ ORDER BY day DESC, user_id, tool, lang
 	return out, nil
 }
 
+type ActivityRow struct {
+	Day      string
+	Tokens   int64 // input + output + cache_creation + cache_read
+	Messages int64
+}
+
+// ActivityAggregate returns one row per UTC day with usage, summed across
+// users, machines, tools and models — the calendar heatmap's whole input,
+// without /summary's per-model breakdown or pricing. Filter semantics
+// match Aggregate.
+func (s *Store) ActivityAggregate(ctx context.Context, user string, from, to time.Time) ([]ActivityRow, error) {
+	q := `
+SELECT to_char(day, 'YYYY-MM-DD') AS day_s,
+       SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens)::bigint,
+       SUM(messages)::bigint
+FROM usage_daily
+WHERE ($1 = '' OR user_id = $1)
+  AND ($2::date IS NULL OR day >= $2)
+  AND ($3::date IS NULL OR day <  $3)
+GROUP BY day
+ORDER BY day
+`
+	var fromArg, toArg any
+	if !from.IsZero() {
+		fromArg = from.UTC()
+	}
+	if !to.IsZero() {
+		toArg = to.UTC()
+	}
+	rows, err := s.pool.Query(ctx, q, user, fromArg, toArg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActivityRow
+	for rows.Next() {
+		var r ActivityRow
+		if err := rows.Scan(&r.Day, &r.Tokens, &r.Messages); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ----- model_prices CRUD ----------------------------------------------------
 
 type PriceRow struct {
