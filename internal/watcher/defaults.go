@@ -22,6 +22,7 @@ var KnownToolDefaults = []struct {
 	{Tool: "astron-code", Subpath: ".acode/sessions"},
 	{Tool: "opencode", Subpath: ".local/share/opencode/opencode.db"},
 	{Tool: "pi", Subpath: ".pi/agent/sessions"},
+	{Tool: "deepseek-harness", Subpath: ".dsh/sessions"},
 }
 
 // AutoDetectSources returns every KnownToolDefault root that exists across

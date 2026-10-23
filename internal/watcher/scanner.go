@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,7 +90,7 @@ func (s *Scanner) Scan() (parsers.ScanResult, map[string]FileState, error) {
 				if werr != nil {
 					return nil // skip unreadable subtrees
 				}
-				if d.IsDir() || filepath.Ext(path) != ".jsonl" {
+				if d.IsDir() || !isTranscript(path) {
 					return nil
 				}
 				prev, _ := s.Checkpoint.Get(path)
@@ -129,3 +130,9 @@ func (e unknownParserErr) Error() string {
 }
 
 func errUnknownParser(tool string) error { return unknownParserErr(tool) }
+
+// isTranscript reports whether path is a transcript file the parsers read:
+// plain *.jsonl, or DeepSeek Harness's zstd-compressed *.jsonl.zstd.
+func isTranscript(path string) bool {
+	return strings.HasSuffix(path, ".jsonl") || strings.HasSuffix(path, ".jsonl.zstd")
+}
