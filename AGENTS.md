@@ -74,5 +74,5 @@
 
 ## 🧠 记忆索引（docs/memory/，脚本生成）
 <!-- MEMORY:START -->
-- （暂无记忆条目，排查后按 AGENTS.md《记忆记录》的约定追加）
+- [Known pitfalls](docs/memory/known-pitfalls.md) — 非显然的性能 / 正确性坑，按「日期 现象 → 原因 → 做法」一行一条。
 <!-- MEMORY:END -->

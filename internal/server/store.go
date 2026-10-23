@@ -549,10 +549,9 @@ func rebuildDailyTx(ctx context.Context, tx pgx.Tx, from, to time.Time) (int64, 
 		       SUM(cache_read_tokens),
 		       COUNT(*), MIN(ts), MAX(ts), NOW()
 		FROM usage_detail
-		WHERE (ts AT TIME ZONE 'UTC')::date >= $1
-		  AND (ts AT TIME ZONE 'UTC')::date <= $2
+		WHERE ts >= $1 AND ts < $2
 		GROUP BY 1, 2, 3, 4, 5
-	`, from, to)
+	`, from, to.AddDate(0, 0, 1))
 	if err != nil {
 		return 0, err
 	}
@@ -574,50 +573,42 @@ type AggRow struct {
 }
 
 // Aggregate returns per-day per-user per-tool per-model token totals (UTC
-// days) with time-aware cost. For each daily row, a LATERAL subquery
-// looks up the model_prices entry that was valid on that day (longest
-// matching prefix, latest valid_from) — so changing today's prices does
-// not retroactively re-price historical rows. If no price is registered,
-// cost is 0 (and the caller may fall back to the in-memory Pricer).
+// days) with time-aware cost. usage_daily is first collapsed across
+// machines, then a LATERAL subquery looks up the model_prices entry that was
+// valid on that day (longest matching prefix, latest valid_from) once per
+// output row — so changing today's prices does not retroactively re-price
+// historical rows. If no price is registered, cost is 0 (and the caller may
+// fall back to the in-memory Pricer).
 func (s *Store) Aggregate(ctx context.Context, user string, from, to time.Time) ([]AggRow, error) {
 	q := `
-SELECT to_char(d.day, 'YYYY-MM-DD')                       AS day_s,
-       d.user_id, d.tool, d.model,
-       SUM(d.input_tokens),
-       SUM(d.output_tokens),
-       SUM(d.cache_creation_tokens),
-       SUM(d.cache_creation_1h_tokens),
-       SUM(d.cache_read_tokens),
-       SUM(d.messages),
-       COALESCE(
-         SUM(d.input_tokens          * p.input_per_1m         ) / 1000000.0, 0) +
-       COALESCE(
-         SUM(d.output_tokens         * p.output_per_1m        ) / 1000000.0, 0) +
-       COALESCE(
-         SUM(d.cache_creation_tokens * p.cache_creation_per_1m) / 1000000.0, 0) +
-       COALESCE(
-         SUM(d.cache_read_tokens     * p.cache_read_per_1m    ) / 1000000.0, 0) +
-       -- 1h writes were already priced at the 5m rate by the term above
-       -- (they are a subset), so only their premium is added here.
-       COALESCE(
-         SUM(d.cache_creation_1h_tokens *
-             GREATEST(p.cache_creation_1h_per_1m - p.cache_creation_per_1m, 0)) / 1000000.0, 0) AS cost_usd
-FROM usage_daily d
-LEFT JOIN LATERAL (
-    SELECT mp.input_per_1m, mp.output_per_1m,
-           mp.cache_creation_per_1m, mp.cache_creation_1h_per_1m, mp.cache_read_per_1m
-    FROM model_prices mp
-    WHERE d.model LIKE mp.model_prefix || '%'
-      AND mp.valid_from <= (d.day::timestamptz + interval '1 day')
-      AND (mp.valid_to IS NULL OR mp.valid_to > d.day::timestamptz)
-    ORDER BY length(mp.model_prefix) DESC, mp.valid_from DESC
-    LIMIT 1
-) p ON TRUE
-WHERE ($1 = '' OR d.user_id = $1)
-  AND ($2::date IS NULL OR d.day >= $2)
-  AND ($3::date IS NULL OR d.day <  $3)
-GROUP BY d.day, d.user_id, d.tool, d.model
-ORDER BY d.day DESC, d.user_id, d.tool, d.model
+WITH agg AS (
+    SELECT d.day, d.user_id, d.tool, d.model,
+           SUM(d.input_tokens)             AS in_t,
+           SUM(d.output_tokens)            AS out_t,
+           SUM(d.cache_creation_tokens)    AS cc_t,
+           SUM(d.cache_creation_1h_tokens) AS cc1h_t,
+           SUM(d.cache_read_tokens)        AS cr_t,
+           SUM(d.messages)                 AS msgs
+    FROM usage_daily d
+    WHERE ($1 = '' OR d.user_id = $1)
+      AND ($2::date IS NULL OR d.day >= $2)
+      AND ($3::date IS NULL OR d.day <  $3)
+    GROUP BY 1, 2, 3, 4
+)
+SELECT to_char(a.day, 'YYYY-MM-DD') AS day_s,
+       a.user_id, a.tool, a.model,
+       a.in_t, a.out_t, a.cc_t, a.cc1h_t, a.cr_t, a.msgs,
+       (a.in_t  * COALESCE(p.input_per_1m,          0)
+      + a.out_t * COALESCE(p.output_per_1m,         0)
+      + a.cc_t  * COALESCE(p.cache_creation_per_1m, 0)
+      -- 1h writes were already priced at the 5m rate by the term above
+      -- (they are a subset), so only their premium is added here.
+      + a.cc1h_t * GREATEST(COALESCE(p.cache_creation_1h_per_1m, 0)
+                          - COALESCE(p.cache_creation_per_1m, 0), 0)
+      + a.cr_t  * COALESCE(p.cache_read_per_1m,     0)) / 1000000.0 AS cost_usd
+FROM agg a
+LEFT JOIN LATERAL (` + priceLookupSQL("a.model", "a.day") + `) p ON TRUE
+ORDER BY a.day DESC, a.user_id, a.tool, a.model
 `
 	var fromArg, toArg any
 	if !from.IsZero() {
@@ -652,6 +643,27 @@ type ClockRow struct {
 	Tokens   int64   // input + output + cache_creation + cache_read
 	Messages int64   // one usage_detail row == one assistant message
 	Cost     float64 // priced per detail row at its own ts, then summed
+}
+
+// priceLookupSQL is the body of the LATERAL subquery that picks the
+// model_prices row in effect on a calendar day: longest prefix of model
+// first, then the latest valid_from. model and day are SQL expressions from
+// the outer query. The candidate prefixes are enumerated from model and
+// matched with equality so the lookup is an index probe on
+// idx_model_prices_range; `model LIKE model_prefix || '%'` cannot use an
+// index and scanned the whole price table once per outer row.
+func priceLookupSQL(model, day string) string {
+	return `
+    SELECT mp.input_per_1m, mp.output_per_1m,
+           mp.cache_creation_per_1m, mp.cache_creation_1h_per_1m, mp.cache_read_per_1m
+    FROM model_prices mp
+    WHERE mp.model_prefix = ANY(ARRAY(
+              SELECT left(` + model + `, n) FROM generate_series(1, length(` + model + `)) n))
+      AND mp.valid_from <= (` + day + `::timestamptz + interval '1 day')
+      AND (mp.valid_to IS NULL OR mp.valid_to > ` + day + `::timestamptz)
+    ORDER BY length(mp.model_prefix) DESC, mp.valid_from DESC
+    LIMIT 1
+`
 }
 
 // ClockAggregate returns per-(weekday, hour) token/message totals with
@@ -697,16 +709,7 @@ SELECT EXTRACT(DOW FROM a.d_local)::int AS dow,
                               - COALESCE(p.cache_creation_per_1m, 0), 0)
           + a.cr_t  * COALESCE(p.cache_read_per_1m,     0)) / 1000000.0), 0) AS cost
 FROM agg a
-LEFT JOIN LATERAL (
-    SELECT mp.input_per_1m, mp.output_per_1m,
-           mp.cache_creation_per_1m, mp.cache_creation_1h_per_1m, mp.cache_read_per_1m
-    FROM model_prices mp
-    WHERE a.model LIKE mp.model_prefix || '%'
-      AND mp.valid_from <= (a.d_local::timestamptz + interval '1 day')
-      AND (mp.valid_to IS NULL OR mp.valid_to > a.d_local::timestamptz)
-    ORDER BY length(mp.model_prefix) DESC, mp.valid_from DESC
-    LIMIT 1
-) p ON TRUE
+LEFT JOIN LATERAL (` + priceLookupSQL("a.model", "a.d_local") + `) p ON TRUE
 GROUP BY 1, 2
 ORDER BY 1, 2
 `
