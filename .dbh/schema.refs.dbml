@@ -1,0 +1,17 @@
+// internal/server/api.go:51,75 & internal/server/schema.go:9-10 (ResolveAPIKey -> Insert into usage_detail; deliberately no FK for pre-auth historical rows)
+Ref: usage_detail.user_id > users.user_id
+
+// internal/server/store.go:82-128 (insertSQL CTE rolls usage_detail.user_id into usage_daily)
+Ref: usage_daily.user_id > users.user_id
+
+// internal/server/api.go:51,81 (ResolveAPIKey -> InsertEdits into edit_detail)
+Ref: edit_detail.user_id > users.user_id
+
+// internal/server/store.go:179-210 (editInsertSQL CTE rolls edit_detail.user_id into edit_daily)
+Ref: edit_daily.user_id > users.user_id
+
+// internal/server/store.go:658,708-712 (Aggregate LEFT JOIN LATERAL longest-prefix match against model_prices.model_prefix)
+Ref: usage_daily.model > model_prices.model_prefix
+
+// internal/server/store.go:760,708-712 (ClockAggregate LEFT JOIN LATERAL longest-prefix match against model_prices.model_prefix)
+Ref: usage_detail.model > model_prices.model_prefix

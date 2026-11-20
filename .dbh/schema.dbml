@@ -1,0 +1,136 @@
+Project {
+  database_type: 'PostgreSQL'
+}
+
+Table "usage_detail" {
+  "message_id" text [not null]
+  "request_id" text [not null, default: '']
+  "session_id" text [not null]
+  "user_id" text [not null]
+  "machine_id" text [not null]
+  "model" text [not null]
+  "ts" timestamptz [not null]
+  "input_tokens" bigint [not null]
+  "output_tokens" bigint [not null]
+  "cache_creation_tokens" bigint [not null]
+  "cache_read_tokens" bigint [not null]
+  "project_path" text
+  "backfill" boolean [not null, default: false]
+  "received_at" timestamptz [not null]
+  "tool" text [not null, default: 'claude-code']
+  "cache_creation_1h_tokens" bigint [not null, default: 0]
+
+  indexes {
+    ("message_id", "request_id") [pk, name: "usage_pkey"]
+    ("machine_id", "ts") [name: "idx_detail_machine"]
+    ("session_id") [name: "idx_detail_session"]
+    ("tool", "ts") [name: "idx_detail_tool"]
+    ("ts") [name: "idx_detail_ts"]
+    ("user_id", "ts") [name: "idx_detail_user_ts"]
+  }
+}
+
+Table "usage_daily" {
+  "day" date [not null]
+  "user_id" text [not null]
+  "machine_id" text [not null]
+  "tool" text [not null]
+  "model" text [not null]
+  "input_tokens" bigint [not null, default: 0]
+  "output_tokens" bigint [not null, default: 0]
+  "cache_creation_tokens" bigint [not null, default: 0]
+  "cache_read_tokens" bigint [not null, default: 0]
+  "messages" bigint [not null, default: 0]
+  "first_ts" timestamptz
+  "last_ts" timestamptz
+  "updated_at" timestamptz [not null, default: `now()`]
+  "cache_creation_1h_tokens" bigint [not null, default: 0]
+
+  indexes {
+    ("day", "user_id", "machine_id", "tool", "model") [pk, name: "usage_daily_pkey"]
+    ("day") [name: "idx_daily_day"]
+    ("tool", "day") [name: "idx_daily_tool"]
+    ("user_id", "day") [name: "idx_daily_user"]
+  }
+}
+
+Table "users" {
+  "user_id" text [pk, not null]
+  "email" text
+  "created_at" timestamptz [not null, default: `now()`]
+  "disabled_at" timestamptz
+}
+
+Table "api_keys" {
+  "key_hash" text [pk, not null]
+  "key_prefix" text [not null]
+  "user_id" text [not null]
+  "name" text
+  "created_at" timestamptz [not null, default: `now()`]
+  "last_used_at" timestamptz
+  "revoked_at" timestamptz
+
+  indexes {
+    ("key_prefix") [name: "idx_api_keys_prefix"]
+    ("user_id") [name: "idx_api_keys_user"]
+  }
+}
+
+Table "model_prices" {
+  "model_prefix" text [not null]
+  "valid_from" timestamptz [not null]
+  "valid_to" timestamptz
+  "input_per_1m" float8 [not null]
+  "output_per_1m" float8 [not null]
+  "cache_creation_per_1m" float8 [not null, default: 0]
+  "cache_read_per_1m" float8 [not null, default: 0]
+  "source" text [not null, default: 'manual']
+  "fetched_at" timestamptz [not null, default: `now()`]
+  "cache_creation_1h_per_1m" float8 [not null, default: 0]
+
+  indexes {
+    ("model_prefix", "valid_from") [pk, name: "model_prices_pkey"]
+    ("model_prefix") [name: "idx_model_prices_active"]
+    ("model_prefix", "valid_from") [name: "idx_model_prices_range"]
+  }
+}
+
+Table "edit_detail" {
+  "event_id" text [pk, not null]
+  "session_id" text [not null]
+  "user_id" text [not null]
+  "machine_id" text [not null]
+  "tool" text [not null, default: 'claude-code']
+  "lang" text [not null, default: 'other']
+  "ts" timestamptz [not null]
+  "lines_added" bigint [not null, default: 0]
+  "lines_removed" bigint [not null, default: 0]
+  "project_path" text
+  "backfill" boolean [not null, default: false]
+  "received_at" timestamptz [not null]
+
+  indexes {
+    ("ts") [name: "idx_edit_detail_ts"]
+    ("user_id", "ts") [name: "idx_edit_detail_user_ts"]
+  }
+}
+
+Table "edit_daily" {
+  "day" date [not null]
+  "user_id" text [not null]
+  "machine_id" text [not null]
+  "tool" text [not null]
+  "lang" text [not null]
+  "lines_added" bigint [not null, default: 0]
+  "lines_removed" bigint [not null, default: 0]
+  "edits" bigint [not null, default: 0]
+  "updated_at" timestamptz [not null, default: `now()`]
+
+  indexes {
+    ("day", "user_id", "machine_id", "tool", "lang") [pk, name: "edit_daily_pkey"]
+    ("day") [name: "idx_edit_daily_day"]
+    ("user_id", "day") [name: "idx_edit_daily_user"]
+  }
+}
+
+Ref: "api_keys"."user_id" > "users"."user_id" [delete: cascade]
