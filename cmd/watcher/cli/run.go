@@ -72,6 +72,9 @@ func DoRun(c *cobra.Command, cfg *RunConfig, home string) error {
 	if cfg.APIKey == "" {
 		return errors.New("--api-key (or $TOKENUSAGE_API_KEY) is required. Mint with: token-usage-server admin key-create <user>")
 	}
+	if cfg.Batch <= 0 {
+		return fmt.Errorf("--batch must be > 0, got %d", cfg.Batch)
+	}
 	machine, err := os.Hostname()
 	if err != nil || machine == "" {
 		return fmt.Errorf("hostname: %w", err)
@@ -242,6 +245,9 @@ func runOnce(ctx context.Context, sc *watcher.Scanner, up *watcher.Uploader, ckp
 func sendBatched(n, batchSize int, kind string, send func(start, end int) (watcher.SendResult, error)) bool {
 	if n == 0 {
 		return true
+	}
+	if batchSize <= 0 {
+		batchSize = n
 	}
 	batches := (n + batchSize - 1) / batchSize
 	sendStart := time.Now()

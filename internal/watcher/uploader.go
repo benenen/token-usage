@@ -10,10 +10,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"tokenusage/internal/types"
 )
+
+// spoolSeq disambiguates spooled batch filenames created within the same
+// clock tick (especially on platforms with coarse wall-clock resolution).
+var spoolSeq atomic.Uint64
 
 type Uploader struct {
 	Endpoint  string
@@ -118,8 +123,9 @@ func (u *Uploader) spool(body []byte) error {
 	if err := os.MkdirAll(u.BufferDir, 0o700); err != nil {
 		return err
 	}
-	// Nanosecond timestamp keeps lexicographic order = chronological order.
-	name := fmt.Sprintf("batch-%d.json", time.Now().UnixNano())
+	// Zero-padded nanosecond timestamp + monotonic sequence keeps
+	// lexicographic order == chronological order and avoids collisions.
+	name := fmt.Sprintf("batch-%020d-%06d.json", time.Now().UnixNano(), spoolSeq.Add(1))
 	tmp := filepath.Join(u.BufferDir, name+".tmp")
 	final := filepath.Join(u.BufferDir, name)
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
@@ -143,12 +149,12 @@ func (u *Uploader) Flush(ctx context.Context) {
 		return
 	}
 	var (
-		drained    int
-		dropped    int
-		totalAcc   int
-		totalDup   int
-		remaining  int
-		lastErr    error
+		drained   int
+		dropped   int
+		totalAcc  int
+		totalDup  int
+		remaining int
+		lastErr   error
 	)
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) == ".tmp" {
@@ -184,8 +190,8 @@ func (u *Uploader) Flush(ctx context.Context) {
 		}
 		_ = os.Remove(p)
 		drained++
-		totalAcc += res.Accepted
-		totalDup += res.Duplicates
+		totalAcc += res.Accepted + res.EditsAccepted
+		totalDup += res.Duplicates + res.EditsDuplicates
 		remaining--
 	}
 	if drained > 0 || dropped > 0 {
@@ -209,19 +215,21 @@ func (u *Uploader) Flush(ctx context.Context) {
 // flow through to the server.
 //
 // Concretely, drop only:
-//   400 bad request    — payload itself is malformed; won't get better
-//   404 not found      — wrong endpoint URL; admin must reconfigure
-//   410 gone           — server explicitly retired this endpoint
-//   413 payload too large — batch oversized; would still be oversized
-//   422 unprocessable  — schema-level rejection (Anthropic+OpenAI use)
+//
+//	400 bad request    — payload itself is malformed; won't get better
+//	404 not found      — wrong endpoint URL; admin must reconfigure
+//	410 gone           — server explicitly retired this endpoint
+//	413 payload too large — batch oversized; would still be oversized
+//	422 unprocessable  — schema-level rejection (Anthropic+OpenAI use)
 //
 // Keep (i.e. NOT a rejection — retry forever):
-//   401 unauthorized   — wrong/revoked API key; will work after fix
-//   403 forbidden      — perms problem; will work after fix
-//   408 request timeout — transient
-//   429 too many requests — transient, the server is asking us to wait
-//   5xx                — transient by definition
-//   transport errors   — dial refused, DNS, TLS, deadline exceeded, etc.
+//
+//	401 unauthorized   — wrong/revoked API key; will work after fix
+//	403 forbidden      — perms problem; will work after fix
+//	408 request timeout — transient
+//	429 too many requests — transient, the server is asking us to wait
+//	5xx                — transient by definition
+//	transport errors   — dial refused, DNS, TLS, deadline exceeded, etc.
 func isHTTPRejection(err error) bool {
 	if err == nil {
 		return false
