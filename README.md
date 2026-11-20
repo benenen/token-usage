@@ -1,16 +1,19 @@
 # token-usage
 
-A central token-usage accounting system for [Claude Code](https://claude.com/claude-code) sessions
-across many machines. Each developer's box runs a small **watcher** that tails the local
-JSONL transcripts under `~/.claude/projects/` and ships only the `message.usage` metadata
-(no prompt content) to a shared **server**. The server dedups, rolls per-day aggregates,
-prices in USD, and exposes both a JSON API and an embedded web dashboard.
+A central token-usage and code-edit accounting system for AI coding CLI sessions
+(`claude-code`, `codex`, `astron-code`, `opencode`, `pi`, `deepseek-harness`, `antigravity`)
+across many machines. Each developer's box runs a small **watcher** that scans local
+session transcripts and ships only usage and code-edit metadata (no prompt or file content)
+to a shared **server**. The server dedups, rolls per-day aggregates, prices in USD,
+and exposes both a JSON API and an embedded web dashboard.
 
 ```
 [Mac1] watcher ──┐
-[Mac2] watcher ──┼──>  /ingest  ──>  PostgreSQL ──>  /summary  ──>  Dashboard
-[Linux] watcher ─┘     (HTTPS)       usage_detail                    (embedded HTML)
-                                     usage_daily
+[Mac2] watcher ──┼──>  /ingest  ──>  PostgreSQL  ──>  /summary  ──>  Dashboard
+[Linux] watcher ─┘     (HTTPS)       usage_detail     /langs         (embedded HTML)
+                                     usage_daily      /clock
+                                     edit_detail      /activity
+                                     edit_daily
 ```
 
 Built as two single binaries (`token-usage-server`, `token-usage-watcher`). No CGO,
@@ -27,7 +30,7 @@ no external runtime beyond PostgreSQL.
 
 ## Data model
 
-Two tables, both managed automatically by the server on first start.
+Seven tables, all managed automatically by the server on first start.
 
 **`usage_detail`** — one row per assistant message; the source of truth.
 
@@ -68,6 +71,9 @@ transcript's own uuid / call id / part id), rolled up per
 **`users` / `api_keys`** — multi-tenant identity. Watchers authenticate with a
 `tuk_…` bearer token; the server stores only the sha256 of each key.
 
+**`model_prices`** — time-versioned per-1M-token rates (`valid_from` / `valid_to`),
+seeded on first start and refreshed from LiteLLM.
+
 ---
 
 ## Quickstart
@@ -85,7 +91,7 @@ export TOKENUSAGE_DSN='postgres://user:pass@host:5432/tokenusage?sslmode=disable
 ./bin/token-usage-server --addr :8080
 ```
 
-The schema (4 tables + indexes) is created idempotently on startup. The dashboard is
+The schema (7 tables + indexes) is created idempotently on startup. The dashboard is
 served at `http://host:8080/`.
 
 > Password with special chars? Use the key=value DSN form to dodge URL-encoding:
@@ -159,6 +165,7 @@ a sortable ledger, and an at-a-glance daily cost chart broken down by model.
 | POST   | `/ingest`   | Bearer key    | Batch usage records and/or edit events from a watcher.    |
 | GET    | `/summary`  | open          | Per-day per-user per-model totals + cost.                 |
 | GET    | `/langs`    | open          | Per-day per-user per-tool per-language code-edit stats.   |
+| GET    | `/clock`    | open          | Per-(weekday, hour) usage distribution in `?tz=<IANA>`.   |
 | GET    | `/activity` | open          | Per-day token totals (all models), for the year heatmap.  |
 | GET    | `/users`    | open          | List of registered users.                                 |
 | GET    | `/prices`   | open          | Active model prices + per-prefix history (LiteLLM-synced).|
@@ -166,7 +173,7 @@ a sortable ledger, and an at-a-glance daily cost chart broken down by model.
 | GET    | `/`         | open          | Embedded dashboard (HTML/CSS/JS).                         |
 | GET    | `/static/*` | open          | Dashboard CSS / JS.                                       |
 
-`/summary`, `/langs` and `/activity` accept `?user=<id>&from=<RFC3339 | unix>&to=<…>`. Empty params mean no filter.
+`/summary`, `/langs`, `/clock`, and `/activity` accept `?user=<id>&from=<RFC3339 | unix>&to=<…>`. Empty params mean no filter; invalid `from`, `to`, or `tz` return `400 Bad Request`.
 
 Note on upgrades: edit events ride in a separate `/ingest` request from usage
 records, so an upgraded watcher keeps working against a pre-`/langs` server
@@ -185,11 +192,13 @@ stricter access.
 ```
 token-usage-server admin [--dsn <DSN>] <command> [flags] [args]
 
-  user-add    [--email <e>] <user_id>            create a user
+  user-add     [--email <e>] <user_id>           create a user
   user-list                                      list users
-  key-create  [--name <label>] <user_id>         mint a new api key (printed once)
-  key-list    [--user <user_id>]                 list api keys (prefix only)
-  key-revoke  <prefix>                           revoke an api key by its 12-char prefix
+  user-disable <user_id>                         disable a user (blocks all their keys)
+  user-enable  <user_id>                         re-enable a disabled user
+  key-create   [--name <label>] <user_id>        mint a new api key (printed once)
+  key-list     [--user <user_id>]                list api keys (prefix only)
+  key-revoke   <prefix>                          revoke an api key by its 12-char prefix
   codex-repair --sessions <dir> --user <id>
                --machine <id> [--apply]          replay and repair Codex token history
 ```
