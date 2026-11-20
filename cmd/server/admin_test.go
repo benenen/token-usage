@@ -123,6 +123,27 @@ func TestCodexRepairCLIApplyAndIdempotence(t *testing.T) {
 	}
 }
 
+func TestAdminUserDisableAndEnable(t *testing.T) {
+	resetCodexRepairDatabase(t)
+
+	if res := runCodexRepairCLI(t, "admin", "user-add", "--email", "alice@example.com", "alice"); res.err != nil {
+		t.Fatalf("user-add: %v\n%s", res.err, res.output)
+	}
+	if res := runCodexRepairCLI(t, "admin", "user-disable", "alice"); res.err != nil {
+		t.Fatalf("user-disable: %v\n%s", res.err, res.output)
+	}
+	assertOutputContains(t, runCodexRepairCLI(t, "admin", "user-list").output, "alice", "true")
+
+	if res := runCodexRepairCLI(t, "admin", "user-enable", "alice"); res.err != nil {
+		t.Fatalf("user-enable: %v\n%s", res.err, res.output)
+	}
+	assertOutputContains(t, runCodexRepairCLI(t, "admin", "user-list").output, "alice", "false")
+
+	if res := runCodexRepairCLI(t, "admin", "user-disable", "ghost"); res.err == nil {
+		t.Fatalf("user-disable on missing user = nil, want error; output:\n%s", res.output)
+	}
+}
+
 type cliResult struct {
 	err    error
 	output string

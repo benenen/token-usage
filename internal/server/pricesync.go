@@ -65,8 +65,20 @@ func SyncPrices(ctx context.Context, store *Store, sourceURL string, client *htt
 
 	rows := selectPriceRows(raw)
 
+	existing, err := store.ListActivePrices(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list active prices: %w", err)
+	}
+	active := make(map[string]PriceRow, len(existing))
+	for _, p := range existing {
+		active[p.ModelPrefix] = p
+	}
+
 	considered = len(rows)
 	for _, row := range rows {
+		if cur, ok := active[row.ModelPrefix]; ok && sameRates(cur, row) {
+			continue
+		}
 		prefix := row.ModelPrefix
 		row.ValidFrom = time.Now()
 		didChange, uerr := store.UpsertPrice(ctx, row)

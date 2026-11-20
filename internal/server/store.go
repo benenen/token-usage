@@ -7,10 +7,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"tokenusage/internal/types"
 )
+
+// ErrInvalidTimezone is returned by ClockAggregate when Postgres rejects
+// the caller-supplied timezone name.
+var ErrInvalidTimezone = errors.New("invalid timezone")
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -353,6 +358,14 @@ type PriceRow struct {
 	FetchedAt       time.Time
 }
 
+func sameRates(a, b PriceRow) bool {
+	return a.InputPer1M == b.InputPer1M &&
+		a.OutputPer1M == b.OutputPer1M &&
+		a.CacheCreate1M == b.CacheCreate1M &&
+		a.CacheCreate1h1M == b.CacheCreate1h1M &&
+		a.CacheRead1M == b.CacheRead1M
+}
+
 // epoch is the synthetic valid_from used for "this price has been in
 // effect since forever". When LiteLLM sees a model for the first time
 // we backfill to 1970 so existing usage data is priced at real (not
@@ -606,6 +619,44 @@ func rebuildDailyTx(ctx context.Context, tx pgx.Tx, from, to time.Time) (int64, 
 	return res.RowsAffected(), nil
 }
 
+// RebuildEditDaily replaces every edit_daily row whose `day` falls in
+// [from, to] (UTC, both inclusive) with a fresh aggregate computed from
+// edit_detail. Mirrors RebuildDaily's single-transaction atomicity.
+func (s *Store) RebuildEditDaily(ctx context.Context, from, to time.Time) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	from = time.Date(from.UTC().Year(), from.UTC().Month(), from.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	to = time.Date(to.UTC().Year(), to.UTC().Month(), to.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM edit_daily WHERE day >= $1 AND day <= $2`,
+		from, to,
+	); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(ctx, `
+		INSERT INTO edit_daily (day, user_id, machine_id, tool, lang,
+		    lines_added, lines_removed, edits, updated_at)
+		SELECT (ts AT TIME ZONE 'UTC')::date,
+		       user_id, machine_id, tool, lang,
+		       SUM(lines_added), SUM(lines_removed),
+		       COUNT(*), NOW()
+		FROM edit_detail
+		WHERE ts >= $1 AND ts < $2
+		GROUP BY 1, 2, 3, 4, 5
+	`, from, to.AddDate(0, 0, 1))
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return res.RowsAffected(), nil
+}
+
 type AggRow struct {
 	Day       string
 	User      string
@@ -770,6 +821,10 @@ ORDER BY 1, 2
 	}
 	rows, err := s.pool.Query(ctx, q, user, fromArg, toArg, tz)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22023" {
+			return nil, ErrInvalidTimezone
+		}
 		return nil, err
 	}
 	defer rows.Close()
@@ -782,6 +837,10 @@ ORDER BY 1, 2
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22023" {
+			return nil, ErrInvalidTimezone
+		}
 		return nil, err
 	}
 	return out, nil

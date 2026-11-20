@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -41,17 +42,21 @@ func hashKey(raw string) string {
 }
 
 // ResolveAPIKey looks up a presented key and returns the owning user_id.
-// It also bumps last_used_at — useful for spotting dead keys later. The
-// UPDATE … RETURNING does both in one round trip and is atomic.
+// It rejects revoked keys and keys belonging to disabled users, and bumps
+// last_used_at in the same atomic UPDATE … RETURNING round trip.
 func (s *Store) ResolveAPIKey(ctx context.Context, raw string) (string, error) {
 	if !strings.HasPrefix(raw, KeyPrefix) {
 		return "", ErrInvalidKey
 	}
 	var userID string
 	err := s.pool.QueryRow(ctx, `
-		UPDATE api_keys SET last_used_at = NOW()
-		WHERE key_hash = $1 AND revoked_at IS NULL
-		RETURNING user_id
+		UPDATE api_keys k SET last_used_at = NOW()
+		FROM users u
+		WHERE k.key_hash = $1
+		  AND k.revoked_at IS NULL
+		  AND u.user_id = k.user_id
+		  AND u.disabled_at IS NULL
+		RETURNING k.user_id
 	`, hashKey(raw)).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrInvalidKey
@@ -79,6 +84,28 @@ func (s *Store) CreateUser(ctx context.Context, userID, email string) error {
 		INSERT INTO users (user_id, email) VALUES ($1, NULLIF($2,''))
 	`, userID, email)
 	return err
+}
+
+// SetUserDisabled disables or re-enables a user. Disabled users' API keys
+// are rejected by ResolveAPIKey even if not individually revoked.
+func (s *Store) SetUserDisabled(ctx context.Context, userID string, disabled bool) error {
+	if userID == "" {
+		return errors.New("user_id is required")
+	}
+	var q string
+	if disabled {
+		q = `UPDATE users SET disabled_at = COALESCE(disabled_at, NOW()) WHERE user_id = $1`
+	} else {
+		q = `UPDATE users SET disabled_at = NULL WHERE user_id = $1`
+	}
+	ct, err := s.pool.Exec(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("no such user %q", userID)
+	}
+	return nil
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]UserRow, error) {

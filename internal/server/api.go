@@ -3,11 +3,14 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"tokenusage/internal/types"
 )
@@ -123,8 +126,11 @@ func (a *API) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	user := q.Get("user")
-	from := parseTime(q.Get("from"))
-	to := parseTime(q.Get("to"))
+	from, to, err := parseTimeRange(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	rows, err := a.Store.Aggregate(r.Context(), user, from, to)
 	if err != nil {
@@ -181,8 +187,12 @@ func (a *API) handleLangs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	rows, err := a.Store.LangAggregate(r.Context(), q.Get("user"),
-		parseTime(q.Get("from")), parseTime(q.Get("to")))
+	from, to, err := parseTimeRange(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err := a.Store.LangAggregate(r.Context(), q.Get("user"), from, to)
 	if err != nil {
 		log.Printf("langs aggregate error: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
@@ -223,9 +233,22 @@ func (a *API) handleClock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	rows, err := a.Store.ClockAggregate(r.Context(), q.Get("user"), q.Get("tz"),
-		parseTime(q.Get("from")), parseTime(q.Get("to")))
+	from, to, err := parseTimeRange(q)
 	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	tz := q.Get("tz")
+	if err := validateTimezone(tz); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err := a.Store.ClockAggregate(r.Context(), q.Get("user"), tz, from, to)
+	if err != nil {
+		if errors.Is(err, ErrInvalidTimezone) {
+			http.Error(w, "invalid tz", http.StatusBadRequest)
+			return
+		}
 		log.Printf("clock aggregate error: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
@@ -262,8 +285,12 @@ func (a *API) handleActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	rows, err := a.Store.ActivityAggregate(r.Context(), q.Get("user"),
-		parseTime(q.Get("from")), parseTime(q.Get("to")))
+	from, to, err := parseTimeRange(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err := a.Store.ActivityAggregate(r.Context(), q.Get("user"), from, to)
 	if err != nil {
 		log.Printf("activity aggregate error: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
@@ -368,15 +395,43 @@ func (a *API) handlePrices(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseTime accepts RFC3339 or unix seconds. Empty string -> zero time.
-func parseTime(s string) time.Time {
+func parseTime(s string) (time.Time, error) {
 	if s == "" {
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t
+		return t, nil
 	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return time.Unix(n, 0).UTC()
+		return time.Unix(n, 0).UTC(), nil
 	}
-	return time.Time{}
+	return time.Time{}, fmt.Errorf("invalid time %q (expected RFC3339 or unix seconds)", s)
+}
+
+func parseTimeRange(q url.Values) (from, to time.Time, err error) {
+	from, err = parseTime(q.Get("from"))
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid from: %w", err)
+	}
+	to, err = parseTime(q.Get("to"))
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid to: %w", err)
+	}
+	return from, to, nil
+}
+
+// validateTimezone checks that tz (if non-empty) is a valid IANA timezone
+// name. Rejects Go's synthetic "Local" sentinel because Postgres does not
+// recognize it as a timezone name.
+func validateTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	if tz == "Local" {
+		return fmt.Errorf("invalid tz %q", tz)
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return fmt.Errorf("invalid tz %q", tz)
+	}
+	return nil
 }

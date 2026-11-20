@@ -3,12 +3,14 @@ package server
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 )
 
-// Worker runs two background reconciliation loops against usage_daily.
-// Both loops call Store.RebuildDaily, which DELETEs + re-aggregates the
-// target date range atomically — so even if /ingest's inline upsert ever
+// Worker runs background reconciliation loops against usage_daily and
+// edit_daily, plus periodic model_prices syncing. The daily loops call
+// Store.RebuildDaily and Store.RebuildEditDaily, which DELETE + re-aggregate
+// the target date range atomically — so even if /ingest's inline upsert ever
 // drifts (bug, manual SQL, partial replay), the next pass corrects it.
 //
 //   - TodayEvery       : how often to rebuild today's row(s).        0 disables.
@@ -24,18 +26,38 @@ type Worker struct {
 	DeepDays    int
 	PriceEvery  time.Duration // how often to sync model_prices; 0 disables
 	PriceSource string        // LiteLLM URL or mirror; "" → DefaultPriceSourceURL
+
+	wg sync.WaitGroup
 }
 
 func (w *Worker) Start(ctx context.Context) {
 	if w.TodayEvery > 0 {
-		go w.todayLoop(ctx)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.todayLoop(ctx)
+		}()
 	}
 	if w.DeepHour >= 0 && w.DeepHour <= 23 && w.DeepDays > 0 {
-		go w.deepLoop(ctx)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.deepLoop(ctx)
+		}()
 	}
 	if w.PriceEvery > 0 {
-		go w.priceLoop(ctx)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.priceLoop(ctx)
+		}()
 	}
+}
+
+// Wait blocks until every goroutine launched by Start has exited.
+// Call after cancelling the context passed to Start and before closing Store.
+func (w *Worker) Wait() {
+	w.wg.Wait()
 }
 
 func (w *Worker) priceLoop(ctx context.Context) {
@@ -95,10 +117,12 @@ func (w *Worker) deepLoop(ctx context.Context) {
 		log.Printf("worker: next deep-rebuild (%d days) at %s (in %s)",
 			w.DeepDays, next.Format("2006-01-02 15:04 MST"),
 			time.Until(next).Round(time.Second))
+		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(time.Until(next)):
+		case <-timer.C:
 		}
 		w.rebuildDeep(ctx)
 	}
@@ -107,28 +131,39 @@ func (w *Worker) deepLoop(ctx context.Context) {
 func (w *Worker) rebuildToday(ctx context.Context) {
 	today := utcDay(time.Now())
 	start := time.Now()
-	n, err := w.Store.RebuildDaily(ctx, today, today)
-	if err != nil {
-		log.Printf("worker: today rebuild failed: %v", err)
-		return
+	usageRows, uerr := w.Store.RebuildDaily(ctx, today, today)
+	if uerr != nil {
+		log.Printf("worker: today usage rebuild failed: %v", uerr)
 	}
-	log.Printf("worker: today rebuild ok — day=%s rows=%d in %s",
-		today.Format("2006-01-02"), n, time.Since(start).Round(time.Millisecond))
+	editRows, eerr := w.Store.RebuildEditDaily(ctx, today, today)
+	if eerr != nil {
+		log.Printf("worker: today edit rebuild failed: %v", eerr)
+	}
+	if uerr == nil && eerr == nil {
+		log.Printf("worker: today rebuild ok — day=%s usage_rows=%d edit_rows=%d in %s",
+			today.Format("2006-01-02"), usageRows, editRows, time.Since(start).Round(time.Millisecond))
+	}
 }
 
 func (w *Worker) rebuildDeep(ctx context.Context) {
 	today := utcDay(time.Now())
 	from := today.AddDate(0, 0, -(w.DeepDays - 1))
 	start := time.Now()
-	n, err := w.Store.RebuildDaily(ctx, from, today)
-	if err != nil {
-		log.Printf("worker: deep rebuild [%s..%s] failed: %v",
-			from.Format("2006-01-02"), today.Format("2006-01-02"), err)
-		return
+	usageRows, uerr := w.Store.RebuildDaily(ctx, from, today)
+	if uerr != nil {
+		log.Printf("worker: deep usage rebuild [%s..%s] failed: %v",
+			from.Format("2006-01-02"), today.Format("2006-01-02"), uerr)
 	}
-	log.Printf("worker: deep rebuild ok — range=[%s..%s] rows=%d in %s",
-		from.Format("2006-01-02"), today.Format("2006-01-02"), n,
-		time.Since(start).Round(time.Millisecond))
+	editRows, eerr := w.Store.RebuildEditDaily(ctx, from, today)
+	if eerr != nil {
+		log.Printf("worker: deep edit rebuild [%s..%s] failed: %v",
+			from.Format("2006-01-02"), today.Format("2006-01-02"), eerr)
+	}
+	if uerr == nil && eerr == nil {
+		log.Printf("worker: deep rebuild ok — range=[%s..%s] usage_rows=%d edit_rows=%d in %s",
+			from.Format("2006-01-02"), today.Format("2006-01-02"), usageRows, editRows,
+			time.Since(start).Round(time.Millisecond))
+	}
 }
 
 func utcDay(t time.Time) time.Time {

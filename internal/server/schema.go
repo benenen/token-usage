@@ -1,8 +1,9 @@
 package server
 
-// schema covers four tables:
+// schema covers seven tables:
 //   - users: identity. Watchers authenticate with an API key.
 //   - api_keys: hashed watcher credentials.
+//   - model_prices: time-versioned per-1M-token rates (longest-prefix lookup).
 //   - usage_detail / usage_daily: token source of truth and daily rollup.
 //   - edit_detail / edit_daily: code-edit source of truth and daily rollup.
 //

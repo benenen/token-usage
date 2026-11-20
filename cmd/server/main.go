@@ -133,13 +133,20 @@ func runServer(addr, pricePath string, rebuildToday time.Duration, deepHour, dee
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	var serveErr error
 	select {
 	case <-sigCh:
 		log.Print("shutdown signal received")
+		cancel()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
+		serveErr = srv.Shutdown(shutCtx)
 	case e := <-errCh:
-		return e
+		cancel()
+		serveErr = e
 	}
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutCancel()
-	return srv.Shutdown(shutCtx)
+	worker.Wait()
+	return serveErr
 }
