@@ -13,6 +13,7 @@
     { test: /3-5-haiku|3\.5-haiku/i,    color: "#b89860" },
     { test: /3-opus/i,                  color: "#c64b1a" },
     { test: /deepseek/i,                color: "#5b7fe0" },
+    { test: /gemini/i,                  color: "#4285f4" },
   ];
   const FALLBACK_PALETTE = ["#d96e9a", "#7a9ec6", "#94c67e", "#c67e7e", "#7a7466"];
   const fallbackUsed = new Map();
@@ -33,6 +34,7 @@
     "opencode":    "#a1a5e8",
     "pi":          "#d96e9a",
     "deepseek-harness": "#4d6bfe",  // DeepSeek blue
+    "antigravity": "#34a853",  // Antigravity green
   };
   function colorForTool(t) { return TOOL_COLORS[t] || "#7a7466"; }
 

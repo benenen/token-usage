@@ -23,6 +23,7 @@ var KnownToolDefaults = []struct {
 	{Tool: "opencode", Subpath: ".local/share/opencode/opencode.db"},
 	{Tool: "pi", Subpath: ".pi/agent/sessions"},
 	{Tool: "deepseek-harness", Subpath: ".dsh/sessions"},
+	{Tool: "antigravity", Subpath: ".gemini/antigravity-cli/brain"},
 }
 
 // AutoDetectSources returns every KnownToolDefault root that exists across

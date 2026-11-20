@@ -57,7 +57,8 @@ hunks (files changed by a Bash command — in bash-first sessions that is most o
 them), codex `apply_patch` envelopes, whether they arrive as a dedicated
 tool call or embedded in the current CLI's single `exec` script (only ones whose
 output confirms success), astron-code `patch_apply_end` events (successful ones), opencode edit/write tool parts, pi `write`/`edit`
-toolCall arguments, deepseek-harness `write`/`edit` tool calls (successful ones).
+toolCall arguments, deepseek-harness `write`/`edit` tool calls (successful ones),
+antigravity `write_file`/`edit_file` tool calls.
 Language is derived from the file extension (`.go`→`golang`, `.java`→`java`, …,
 unknown→`other`); file paths and contents never leave the machine — only the
 language tag and line counts are uploaded. Deduped on `event_id` (the
@@ -117,7 +118,7 @@ served at `http://host:8080/`.
 That's it. The watcher will:
 
 1. **Auto-detect** every supported tool on the box (currently `claude-code`,
-   `codex`, `astron-code`, `opencode`, `pi`, `deepseek-harness`) and walk each one's transcript root in parallel.
+   `codex`, `astron-code`, `opencode`, `pi`, `deepseek-harness`, `antigravity`) and walk each one's transcript root in parallel.
 2. On first run, ship the **whole history** (records older than 1h are tagged
    `backfill=true` so they don't spike the live curves).
 3. On every subsequent tick (default 5s), ship only the new tail; per-file
@@ -245,9 +246,10 @@ Supported tools today: **claude-code** (`~/.claude/projects/**/*.jsonl`),
 **codex** (`~/.codex/sessions/**/*.jsonl`), **astron-code**
 (`~/.acode/sessions/**/*.jsonl`, same format as codex), **opencode**
 (`~/.local/share/opencode/opencode.db`, a single SQLite file), **pi**
-(`~/.pi/agent/sessions/**/*.jsonl`), and **deepseek-harness**
+(`~/.pi/agent/sessions/**/*.jsonl`), **deepseek-harness**
 (`~/.dsh/sessions/**/*.jsonl.zstd`, zstd-compressed and re-read whole on
-change). The watcher
+change), and **antigravity**
+(`~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl`). The watcher
 auto-detects whichever of these exist on the box. Adding a new tool is a
 new file under `internal/watcher/parsers/`; the rest of the pipeline
 (checkpoint, batching, auth, schema) is format-agnostic.
